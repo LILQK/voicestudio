@@ -23,10 +23,12 @@ const requiredEnv = (name: string): string => {
 };
 
 const resolvedQwenDir = process.env.QWEN_DIR ?? process.cwd();
+const resolvedVoicesDir = process.env.VOICES_DIR ?? path.resolve(process.cwd(), "voices");
 
 export const config = {
   backendPort: toNumber(process.env.BACKEND_PORT, 8787),
   qwenDir: resolvedQwenDir,
+  voicesDir: resolvedVoicesDir,
   qwenStartCmd: requiredEnv("QWEN_START_CMD"),
   qwenApiUrl: process.env.QWEN_API_URL ?? "http://127.0.0.1:8000",
   startupTimeoutMs: toNumber(process.env.STARTUP_TIMEOUT_MS, 180000),

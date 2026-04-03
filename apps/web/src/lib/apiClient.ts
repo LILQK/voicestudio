@@ -16,6 +16,12 @@ export type ProxyResult = {
   transport?: string;
 };
 
+export type VoicePreset = {
+  name: string;
+  size: number;
+  mtimeMs: number;
+};
+
 const asFormDataIfNeeded = (payload: FormData | Record<string, unknown>): BodyInit =>
   payload instanceof FormData ? payload : JSON.stringify(payload);
 
@@ -125,5 +131,15 @@ export const fetchAudioViaProxy = async (sourceUrl: string): Promise<Blob> => {
   }
 
   return response.blob();
+};
+
+export const getVoicePresets = async (): Promise<VoicePreset[]> => {
+  const response = await fetch("/api/qwen/voices");
+  const json = await response.json();
+  if (!response.ok || !json || typeof json !== "object" || !Array.isArray((json as { voices?: unknown }).voices)) {
+    throw new Error("Unable to fetch voice presets");
+  }
+
+  return (json as { voices: VoicePreset[] }).voices;
 };
 

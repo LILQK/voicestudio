@@ -19,15 +19,18 @@ import {
   extractGeneratedAudioUrl,
   fetchAudioViaProxy,
   getQwenStatus,
+  getVoicePresets,
   loadPromptAndGen,
   type QwenState,
 } from "@/lib/apiClient";
 
 type ModelItem = {
   id: string;
-  file: File;
   name: string;
   size: number;
+  source: "preset" | "uploaded";
+  file?: File;
+  presetName?: string;
 };
 
 type ParagraphStatus = "pending" | "generating" | "ok" | "error";
@@ -47,6 +50,8 @@ const MAX_SEGMENT_CHARACTERS = 320;
 const AUTO_SPLIT_DELAY_MS = 1800;
 const ACCEPTED_MODEL_EXTENSIONS = new Set([".pt", ".pth", ".bin"]);
 
+const PRESET_MODEL_ID_PREFIX = "preset:";
+
 const createId = (): string =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -64,6 +69,15 @@ const formatBytes = (bytes: number): string => {
 
   return `${(kb / 1024).toFixed(2)} MB`;
 };
+
+const buildPresetModelItems = (presets: { name: string; size: number }[]): ModelItem[] =>
+  presets.map((preset) => ({
+    id: `${PRESET_MODEL_ID_PREFIX}${preset.name}`,
+    name: preset.name,
+    size: preset.size,
+    source: "preset",
+    presetName: preset.name,
+  }));
 
 const splitOversizedBlock = (block: string, maxChars: number): string[] => {
   const cleaned = block.trim();
@@ -269,6 +283,35 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+
+    const loadDefaultVoices = async (): Promise<void> => {
+      try {
+        const presets = await getVoicePresets();
+        if (!active) {
+          return;
+        }
+
+        setModels((previous) => {
+          const uploaded = previous.filter((item) => item.source === "uploaded");
+          const presetModels = buildPresetModelItems(presets);
+          return [...presetModels, ...uploaded];
+        });
+      } catch {
+        if (active) {
+          setGlobalError("Unable to load voice presets from /voices.");
+        }
+      }
+    };
+
+    void loadDefaultVoices();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
       return null;
@@ -401,7 +444,11 @@ function App() {
     }
 
     setModels((previous) => {
-      const signatures = new Set(previous.map((item) => `${item.name}-${item.size}`));
+      const signatures = new Set(
+        previous
+          .filter((item) => item.source === "uploaded")
+          .map((item) => `${item.name}-${item.size}`),
+      );
       const additions = validFiles
         .filter((file) => !signatures.has(`${file.name}-${file.size}`))
         .map<ModelItem>((file) => ({
@@ -409,6 +456,7 @@ function App() {
           file,
           name: file.name,
           size: file.size,
+          source: "uploaded",
         }));
 
       const merged = [...previous, ...additions];
@@ -451,7 +499,13 @@ function App() {
     try {
       const formData = new FormData();
       formData.append("text", target.text);
-      formData.append("audio", activeModel.file);
+      if (activeModel.source === "preset" && activeModel.presetName) {
+        formData.append("voicePreset", activeModel.presetName);
+      } else if (activeModel.file) {
+        formData.append("audio", activeModel.file);
+      } else {
+        throw new Error("Selected voice model is invalid.");
+      }
 
       const result = await loadPromptAndGen(formData);
       const audioUrl = extractGeneratedAudioUrl(result);
@@ -816,10 +870,15 @@ function App() {
                 {selectedModel ? (
                   <div className="rounded-md border border-border/80 bg-muted/60 p-2 text-xs">
                     <p className="font-medium">Active: {selectedModel.name}</p>
-                    <p className="text-muted-foreground">{formatBytes(selectedModel.size)}</p>
+                    <p className="text-muted-foreground">
+                      {formatBytes(selectedModel.size)} ·{" "}
+                      {selectedModel.source === "preset" ? "Preset" : "Uploaded"}
+                    </p>
                   </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground">Upload at least one `.pt` file to start.</p>
+                  <p className="text-xs text-muted-foreground">
+                    No voices found in `/voices`. Upload one or add `.pt/.pth/.bin` files there.
+                  </p>
                 )}
               </CardContent>
             </Card>

@@ -7,6 +7,7 @@ import { config } from "../config.js";
 import { InputValidationError, InferenceError } from "../qwen/qwenErrors.js";
 import { assertReadyOrThrow, qwenManager } from "../qwen/qwenManager.js";
 import { proxyToQwen } from "../qwen/qwenProxyClient.js";
+import { listVoicePresets, loadVoicePresetAsUpload } from "../qwen/voiceLibrary.js";
 
 const qwenRouter = Router();
 const endpointChains = new Map<string, Promise<void>>();
@@ -34,13 +35,22 @@ qwenRouter.get("/status", (_req: Request, res: Response) => {
   res.json(qwenManager.getState());
 });
 
+qwenRouter.get("/voices", async (_req: Request, res: Response): Promise<void> => {
+  const voices = await listVoicePresets();
+  res.json({ voices, voicesDir: config.voicesDir });
+});
+
 const runEndpoint = (endpoint: "/run_voice_clone" | "/save_prompt" | "/load_prompt_and_gen") =>
   async (req: Request, res: Response): Promise<void> => {
     const result = await runSerial(endpoint, async () => {
       const requestStart = Date.now();
       await assertReadyOrThrow();
 
-      const files = (req.files as Express.Multer.File[]) ?? [];
+      let files = (req.files as Express.Multer.File[]) ?? [];
+      const voicePreset = typeof req.body.voicePreset === "string" ? req.body.voicePreset.trim() : "";
+      if (files.length === 0 && voicePreset) {
+        files = [await loadVoicePresetAsUpload(voicePreset)];
+      }
       validateUploadedFiles(files, endpoint);
 
       logger.info("Proxy request started", {
