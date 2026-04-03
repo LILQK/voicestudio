@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select } from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { VoiceManagerDrawer } from "@/components/voice-manager-drawer";
@@ -72,6 +73,14 @@ const formatBytes = (bytes: number): string => {
   }
 
   return `${(kb / 1024).toFixed(2)} MB`;
+};
+
+const formatDurationLabel = (seconds: number): string => {
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const total = Math.floor(safe);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
 };
 
 const buildPresetModelItems = (presets: { name: string; size: number }[]): ModelItem[] =>
@@ -223,6 +232,9 @@ function App() {
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [activeParagraphId, setActiveParagraphId] = useState<string | null>(null);
+  const [playingParagraphId, setPlayingParagraphId] = useState<string | null>(null);
+  const [paragraphDurations, setParagraphDurations] = useState<Record<string, number>>({});
+  const [timelinePositionSec, setTimelinePositionSec] = useState(0);
   const [isTimelinePlaying, setIsTimelinePlaying] = useState(false);
   const [timelineCurrentIndex, setTimelineCurrentIndex] = useState<number | null>(null);
   const [isVoiceManagerOpen, setIsVoiceManagerOpen] = useState(false);
@@ -232,7 +244,11 @@ function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const resegmentRequestedRef = useRef(false);
   const currentAudioUrlRef = useRef<string | null>(null);
+  const durationCacheRef = useRef<WeakMap<Blob, number>>(new WeakMap());
   const playbackSourceRef = useRef<"manual" | "timeline" | null>(null);
+  const seekRequestIdRef = useRef(0);
+  const shouldResumeAfterSeekRef = useRef(false);
+  const isTimelineScrubbingRef = useRef(false);
   const timelinePlayingRef = useRef(false);
 
   const applyPresetModels = useCallback((presets: VoicePreset[]): void => {
@@ -371,9 +387,123 @@ function App() {
     [paragraphs],
   );
 
+  const timelineSegments = useMemo(() => {
+    let cursor = 0;
+    return playableParagraphIndexes.map((paragraphIndex) => {
+      const paragraph = paragraphs[paragraphIndex];
+      const duration = Math.max(paragraphDurations[paragraph?.id ?? ""] ?? 0, 0);
+      const segment = {
+        paragraphIndex,
+        paragraphId: paragraph?.id ?? "",
+        start: cursor,
+        end: cursor + duration,
+        duration,
+      };
+      cursor += duration;
+      return segment;
+    });
+  }, [playableParagraphIndexes, paragraphs, paragraphDurations]);
+
+  const timelineSegmentByParagraphIndex = useMemo(() => {
+    const map = new Map<number, (typeof timelineSegments)[number]>();
+    for (const segment of timelineSegments) {
+      map.set(segment.paragraphIndex, segment);
+    }
+    return map;
+  }, [timelineSegments]);
+
+  const totalTimelineDuration =
+    timelineSegments.length > 0 ? timelineSegments[timelineSegments.length - 1].end : 0;
+
   const hasPlayableTimeline = playableParagraphIndexes.length > 0;
   const timelineCurrentParagraph =
     timelineCurrentIndex !== null ? paragraphs[timelineCurrentIndex] ?? null : null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const playableParagraphs = paragraphs.filter(
+      (paragraph) => paragraph.status === "ok" && Boolean(paragraph.audioBlob),
+    );
+
+    if (playableParagraphs.length === 0) {
+      setParagraphDurations((previous) => (Object.keys(previous).length === 0 ? previous : {}));
+      return;
+    }
+
+    const knownIds = new Set(playableParagraphs.map((paragraph) => paragraph.id));
+    setParagraphDurations((previous) => {
+      const nextEntries = Object.entries(previous).filter(([id]) => knownIds.has(id));
+      const next = Object.fromEntries(nextEntries);
+      const previousKeys = Object.keys(previous);
+      const nextKeys = Object.keys(next);
+      const isSame =
+        previousKeys.length === nextKeys.length &&
+        nextKeys.every((key) => previous[key] === next[key]);
+      return isSame ? previous : next;
+    });
+
+    const pending = playableParagraphs.filter((paragraph) => paragraphDurations[paragraph.id] === undefined);
+    if (pending.length === 0) {
+      return;
+    }
+
+    const readDuration = async (blob: Blob): Promise<number> => {
+      const cached = durationCacheRef.current.get(blob);
+      if (cached !== undefined) {
+        return cached;
+      }
+
+      const objectUrl = URL.createObjectURL(blob);
+      const audio = new Audio();
+      audio.preload = "metadata";
+      audio.src = objectUrl;
+
+      const duration = await new Promise<number>((resolve) => {
+        const done = (value: number) => {
+          audio.onloadedmetadata = null;
+          audio.onerror = null;
+          URL.revokeObjectURL(objectUrl);
+          resolve(Number.isFinite(value) && value > 0 ? value : 0);
+        };
+
+        audio.onloadedmetadata = () => done(audio.duration);
+        audio.onerror = () => done(0);
+      });
+
+      durationCacheRef.current.set(blob, duration);
+      return duration;
+    };
+
+    void Promise.all(
+      pending.map(async (paragraph) => {
+        const blob = paragraph.audioBlob;
+        const duration = blob ? await readDuration(blob) : 0;
+        return { id: paragraph.id, duration };
+      }),
+    ).then((results) => {
+      if (cancelled) {
+        return;
+      }
+
+      setParagraphDurations((previous) => {
+        const next = { ...previous };
+        for (const item of results) {
+          next[item.id] = item.duration;
+        }
+        const previousKeys = Object.keys(previous);
+        const nextKeys = Object.keys(next);
+        const isSame =
+          previousKeys.length === nextKeys.length &&
+          nextKeys.every((key) => previous[key] === next[key]);
+        return isSame ? previous : next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [paragraphs, paragraphDurations]);
 
   useEffect(() => {
     if (hasPlayableTimeline) {
@@ -387,7 +517,35 @@ function App() {
 
     setIsTimelinePlaying(false);
     setTimelineCurrentIndex(null);
+    setTimelinePositionSec(0);
   }, [hasPlayableTimeline]);
+
+  useEffect(() => {
+    if (timelineCurrentIndex === null) {
+      return;
+    }
+
+    const syncPosition = (): void => {
+      if (isTimelineScrubbingRef.current) {
+        return;
+      }
+
+      const audio = audioRef.current;
+      const segment = timelineSegmentByParagraphIndex.get(timelineCurrentIndex);
+      if (!audio || !segment) {
+        return;
+      }
+
+      const nextPosition = Math.min(totalTimelineDuration, segment.start + audio.currentTime);
+      setTimelinePositionSec(nextPosition);
+    };
+
+    syncPosition();
+    const intervalId = window.setInterval(syncPosition, 120);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [timelineCurrentIndex, timelineSegmentByParagraphIndex, totalTimelineDuration]);
 
   useEffect(() => {
     if (generationStatus === "running") {
@@ -660,10 +818,14 @@ function App() {
   };
 
   const clearActiveAudio = (): void => {
+    seekRequestIdRef.current += 1;
+    setPlayingParagraphId(null);
+
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.onended = null;
       audioRef.current.onerror = null;
+      audioRef.current.onloadedmetadata = null;
       audioRef.current = null;
     }
 
@@ -700,6 +862,9 @@ function App() {
       return;
     }
 
+    const segment = timelineSegmentByParagraphIndex.get(targetIndex);
+    const baseOffset = segment?.start ?? 0;
+
     clearActiveAudio();
 
     const objectUrl = URL.createObjectURL(target.audioBlob);
@@ -709,9 +874,12 @@ function App() {
     playbackSourceRef.current = "timeline";
     setTimelineCurrentIndex(targetIndex);
     setActiveParagraphId(target.id);
+    setPlayingParagraphId(target.id);
+    setTimelinePositionSec(baseOffset);
     setIsTimelinePlaying(true);
 
     audio.onended = () => {
+      setPlayingParagraphId(null);
       if (currentAudioUrlRef.current) {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
@@ -729,6 +897,7 @@ function App() {
     };
 
     audio.onerror = () => {
+      setPlayingParagraphId(null);
       if (currentAudioUrlRef.current) {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
@@ -744,8 +913,134 @@ function App() {
     };
 
     void audio.play().catch(() => {
+      setPlayingParagraphId(null);
       setIsTimelinePlaying(false);
     });
+  };
+
+  const onTimelineSeek = (requested: number, forceResume = false): void => {
+    if (!Number.isFinite(requested) || timelineSegments.length === 0) {
+      return;
+    }
+
+    const clamped = Math.max(0, Math.min(requested, totalTimelineDuration));
+    setTimelinePositionSec(clamped);
+
+    const targetSegment =
+      timelineSegments.find((segment) => clamped <= segment.end) ?? timelineSegments[timelineSegments.length - 1];
+    if (!targetSegment) {
+      return;
+    }
+
+    const targetParagraph = paragraphsRef.current[targetSegment.paragraphIndex];
+    if (!targetParagraph?.audioBlob) {
+      return;
+    }
+
+    const currentAudio = audioRef.current;
+    const wasPlaying =
+      forceResume ||
+      (playbackSourceRef.current === "timeline" && isTimelinePlaying) ||
+      (playbackSourceRef.current === "timeline" && currentAudio !== null && !currentAudio.paused);
+    const offsetInSegment = Math.max(0, clamped - targetSegment.start);
+
+    clearActiveAudio();
+
+    const objectUrl = URL.createObjectURL(targetParagraph.audioBlob);
+    const audio = new Audio(objectUrl);
+    const seekRequestId = seekRequestIdRef.current;
+    audioRef.current = audio;
+    currentAudioUrlRef.current = objectUrl;
+    playbackSourceRef.current = "timeline";
+    setTimelineCurrentIndex(targetSegment.paragraphIndex);
+    setActiveParagraphId(targetParagraph.id);
+    setPlayingParagraphId(wasPlaying ? targetParagraph.id : null);
+    setIsTimelinePlaying(wasPlaying);
+
+    audio.onended = () => {
+      setPlayingParagraphId(null);
+      if (currentAudioUrlRef.current) {
+        URL.revokeObjectURL(currentAudioUrlRef.current);
+        currentAudioUrlRef.current = null;
+      }
+
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+
+      if (playbackSourceRef.current !== "timeline" || !timelinePlayingRef.current) {
+        return;
+      }
+
+      playTimelineFrom(targetSegment.paragraphIndex + 1);
+    };
+
+    audio.onerror = () => {
+      setPlayingParagraphId(null);
+      if (currentAudioUrlRef.current) {
+        URL.revokeObjectURL(currentAudioUrlRef.current);
+        currentAudioUrlRef.current = null;
+      }
+
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+    };
+
+    const applyOffset = (): void => {
+      const seekTarget = Math.max(0, Math.min(offsetInSegment, Math.max((audio.duration || 0) - 0.01, 0)));
+      if (!Number.isFinite(seekTarget)) {
+        return;
+      }
+
+      try {
+        audio.currentTime = seekTarget;
+      } catch {
+        // Ignore browser-level seek errors while metadata loads.
+      }
+    };
+
+    audio.onloadedmetadata = () => {
+      if (audioRef.current !== audio || seekRequestId !== seekRequestIdRef.current) {
+        return;
+      }
+
+      applyOffset();
+      if (wasPlaying) {
+        void audio.play().catch(() => {
+          setPlayingParagraphId(null);
+          setIsTimelinePlaying(false);
+        });
+      }
+    };
+
+    if (!wasPlaying) {
+      applyOffset();
+    }
+  };
+
+  const onTimelineScrubStart = (): void => {
+    isTimelineScrubbingRef.current = true;
+
+    const audio = audioRef.current;
+    const isTimelineAudioActive = playbackSourceRef.current === "timeline" && Boolean(audio);
+    const wasPlaying = isTimelineAudioActive && audio !== null && !audio.paused;
+
+    shouldResumeAfterSeekRef.current = wasPlaying;
+    if (wasPlaying && audio) {
+      audio.pause();
+      setPlayingParagraphId(null);
+      setIsTimelinePlaying(false);
+    }
+  };
+
+  const onTimelineScrubEnd = (): void => {
+    // Keep locked until onValueCommitted runs; fallback unlock below covers cancellations.
+    window.setTimeout(() => {
+      if (isTimelineScrubbingRef.current) {
+        isTimelineScrubbingRef.current = false;
+      }
+    }, 50);
   };
 
   const onTimelineToggle = (): void => {
@@ -753,6 +1048,7 @@ function App() {
       if (playbackSourceRef.current === "timeline" && audioRef.current) {
         audioRef.current.pause();
       }
+      setPlayingParagraphId(null);
       setIsTimelinePlaying(false);
       return;
     }
@@ -763,8 +1059,11 @@ function App() {
       audioRef.current.paused &&
       timelineCurrentIndex !== null
     ) {
+      const currentParagraph = paragraphsRef.current[timelineCurrentIndex];
+      setPlayingParagraphId(currentParagraph?.id ?? null);
       setIsTimelinePlaying(true);
       void audioRef.current.play().catch(() => {
+        setPlayingParagraphId(null);
         setIsTimelinePlaying(false);
       });
       return;
@@ -772,6 +1071,44 @@ function App() {
 
     const startIndex = timelineCurrentIndex ?? 0;
     playTimelineFrom(startIndex);
+  };
+
+  const onParagraphPlaybackToggle = (item: ParagraphItem): void => {
+    if (!item.audioBlob) {
+      return;
+    }
+
+    const selectedTimelineParagraph =
+      timelineCurrentIndex !== null ? paragraphsRef.current[timelineCurrentIndex] : null;
+    const isCurrentAudioItem =
+      selectedTimelineParagraph?.id === item.id &&
+      playbackSourceRef.current !== null &&
+      Boolean(audioRef.current);
+
+    if (isCurrentAudioItem && audioRef.current && !audioRef.current.paused) {
+      audioRef.current.pause();
+      setPlayingParagraphId(null);
+      if (playbackSourceRef.current === "timeline") {
+        setIsTimelinePlaying(false);
+      }
+      return;
+    }
+
+    if (isCurrentAudioItem && audioRef.current && audioRef.current.paused) {
+      setPlayingParagraphId(item.id);
+      if (playbackSourceRef.current === "timeline") {
+        setIsTimelinePlaying(true);
+      }
+      void audioRef.current.play().catch(() => {
+        setPlayingParagraphId(null);
+        if (playbackSourceRef.current === "timeline") {
+          setIsTimelinePlaying(false);
+        }
+      });
+      return;
+    }
+
+    onPlay(item);
   };
 
   const onPlay = (item: ParagraphItem): void => {
@@ -785,14 +1122,20 @@ function App() {
     playbackSourceRef.current = "manual";
     setIsTimelinePlaying(false);
     setTimelineCurrentIndex(itemIndex >= 0 ? itemIndex : null);
+    if (itemIndex >= 0) {
+      const segment = timelineSegmentByParagraphIndex.get(itemIndex);
+      setTimelinePositionSec(segment?.start ?? 0);
+    }
 
     const objectUrl = URL.createObjectURL(item.audioBlob);
     const audio = new Audio(objectUrl);
     audioRef.current = audio;
     currentAudioUrlRef.current = objectUrl;
     setActiveParagraphId(item.id);
+    setPlayingParagraphId(item.id);
 
     audio.onended = () => {
+      setPlayingParagraphId(null);
       if (currentAudioUrlRef.current) {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
@@ -804,13 +1147,16 @@ function App() {
     };
 
     audio.onerror = () => {
+      setPlayingParagraphId(null);
       if (currentAudioUrlRef.current) {
         URL.revokeObjectURL(currentAudioUrlRef.current);
         currentAudioUrlRef.current = null;
       }
     };
 
-    void audio.play();
+    void audio.play().catch(() => {
+      setPlayingParagraphId(null);
+    });
   };
 
   const onExport = async (): Promise<void> => {
@@ -1010,10 +1356,10 @@ function App() {
                                   size="sm"
                                   variant="outline"
                                   disabled={!item.audioBlob}
-                                  onClick={() => onPlay(item)}
+                                  onClick={() => onParagraphPlaybackToggle(item)}
                                 >
-                                  <Play />
-                                  Play
+                                  {playingParagraphId === item.id ? <Pause /> : <Play />}
+                                  {playingParagraphId === item.id ? "Pause" : "Play"}
                                 </Button>
                                 <Button
                                   size="sm"
@@ -1061,25 +1407,57 @@ function App() {
           </div>
 
           <footer className="fixed right-0 bottom-0 left-0 z-30 border-t border-border/80 bg-background/95 backdrop-blur md:left-[320px]">
-            <div className="mx-auto grid w-full max-w-5xl grid-cols-[1fr_auto_1fr] items-center px-4 py-3 md:px-6">
-              <div />
-              <div className="flex justify-center">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!hasPlayableTimeline}
-                  onClick={onTimelineToggle}
-                  className="size-11 rounded-full p-0"
-                  aria-label={isTimelinePlaying ? "Pause timeline" : "Play timeline"}
-                >
-                  {isTimelinePlaying ? <Pause className="size-5" /> : <Play className="size-5" />}
-                </Button>
+            <div className="mx-auto w-full max-w-5xl px-4 py-3 md:px-6">
+              <div className="grid grid-cols-[1fr_auto_1fr] items-center">
+                <div />
+                <div className="flex justify-center">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!hasPlayableTimeline}
+                    onClick={onTimelineToggle}
+                    className="size-11 rounded-full p-0"
+                    aria-label={isTimelinePlaying ? "Pause timeline" : "Play timeline"}
+                  >
+                    {isTimelinePlaying ? <Pause className="size-5" /> : <Play className="size-5" />}
+                  </Button>
+                </div>
+                <p className="text-right text-xs text-muted-foreground">
+                  {timelineCurrentParagraph
+                    ? `Paragraph ${timelineCurrentIndex !== null ? timelineCurrentIndex + 1 : ""}`
+                    : `${playableParagraphIndexes.length} clip${playableParagraphIndexes.length === 1 ? "" : "s"}`}
+                </p>
               </div>
-              <p className="text-right text-xs text-muted-foreground">
-                {timelineCurrentParagraph
-                  ? `Paragraph ${timelineCurrentIndex !== null ? timelineCurrentIndex + 1 : ""}`
-                  : `${playableParagraphIndexes.length} clip${playableParagraphIndexes.length === 1 ? "" : "s"}`}
-              </p>
+
+              <div className="mt-2 flex items-center gap-3">
+                <span className="w-10 text-xs tabular-nums text-muted-foreground">
+                  {formatDurationLabel(timelinePositionSec)}
+                </span>
+                <Slider
+                  min={0}
+                  max={Math.max(totalTimelineDuration, 0)}
+                  step={0.01}
+                  value={[Math.min(timelinePositionSec, Math.max(totalTimelineDuration, 0))]}
+                  onValueChange={(nextValue) => {
+                    const next = nextValue[0] ?? 0;
+                    const clamped = Math.max(0, Math.min(next, totalTimelineDuration));
+                    setTimelinePositionSec(clamped);
+                  }}
+                  onValueCommitted={(nextValue) => {
+                    const shouldResume = shouldResumeAfterSeekRef.current;
+                    shouldResumeAfterSeekRef.current = false;
+                    isTimelineScrubbingRef.current = false;
+                    onTimelineSeek(nextValue[0] ?? 0, shouldResume);
+                  }}
+                  onScrubStart={onTimelineScrubStart}
+                  onScrubEnd={onTimelineScrubEnd}
+                  disabled={!hasPlayableTimeline || totalTimelineDuration <= 0}
+                  aria-label="Timeline seek"
+                />
+                <span className="w-10 text-right text-xs tabular-nums text-muted-foreground">
+                  {formatDurationLabel(totalTimelineDuration)}
+                </span>
+              </div>
             </div>
           </footer>
         </section>
