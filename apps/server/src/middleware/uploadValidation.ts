@@ -16,13 +16,18 @@ const dedupe = (items: string[]): string[] => [...new Set(items.map((item) => it
 
 const allowedAudioMimes = dedupe(config.allowedAudioMime);
 const allowedPromptMimes = dedupe(config.allowedPromptMime);
+const allowedAudioExtensions = [".wav", ".mp3", ".flac", ".webm", ".m4a", ".ogg"];
 const allowedPromptExtensions = [".pt", ".pth", ".bin", ".json", ".txt", ".wav"];
 
 const endpointAllowsFile = (endpoint: string, file: Express.Multer.File): boolean => {
   const ext = path.extname(file.originalname).toLowerCase();
 
   if (endpoint === "/run_voice_clone") {
-    return allowedAudioMimes.includes(file.mimetype);
+    if (allowedAudioMimes.includes(file.mimetype)) {
+      return true;
+    }
+
+    return file.mimetype === "application/octet-stream" && allowedAudioExtensions.includes(ext);
   }
 
   const isPromptEndpoint = endpoint === "/save_prompt" || endpoint === "/load_prompt_and_gen";

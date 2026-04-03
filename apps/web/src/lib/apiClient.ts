@@ -22,6 +22,19 @@ export type VoicePreset = {
   mtimeMs: number;
 };
 
+const extractApiMessage = (json: unknown): string | null => {
+  if (
+    json &&
+    typeof json === "object" &&
+    "error" in json &&
+    typeof (json as { error?: { message?: unknown } }).error?.message === "string"
+  ) {
+    return (json as { error: { message: string } }).error.message;
+  }
+
+  return null;
+};
+
 const asFormDataIfNeeded = (payload: FormData | Record<string, unknown>): BodyInit =>
   payload instanceof FormData ? payload : JSON.stringify(payload);
 
@@ -142,4 +155,75 @@ export const getVoicePresets = async (): Promise<VoicePreset[]> => {
 
   return (json as { voices: VoicePreset[] }).voices;
 };
+
+export const createVoicePreset = async (payload: FormData): Promise<VoicePreset> => {
+  const response = await fetch("/api/qwen/voices", {
+    method: "POST",
+    body: payload,
+  });
+
+  const text = await response.text();
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(extractApiMessage(json) ?? `Request failed with status ${response.status}`);
+  }
+
+  if (!json || typeof json !== "object" || !("voice" in json)) {
+    throw new Error("Unable to create voice preset");
+  }
+
+  return (json as { voice: VoicePreset }).voice;
+};
+
+export const renameVoicePreset = async (voiceName: string, newName: string): Promise<VoicePreset> => {
+  const response = await fetch(`/api/qwen/voices/${encodeURIComponent(voiceName)}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: newName }),
+  });
+
+  const text = await response.text();
+  let json: unknown = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(extractApiMessage(json) ?? `Request failed with status ${response.status}`);
+  }
+
+  if (!json || typeof json !== "object" || !("voice" in json)) {
+    throw new Error("Unable to rename voice preset");
+  }
+
+  return (json as { voice: VoicePreset }).voice;
+};
+
+export const deleteVoicePreset = async (voiceName: string): Promise<void> => {
+  const response = await fetch(`/api/qwen/voices/${encodeURIComponent(voiceName)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let json: unknown = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    throw new Error(extractApiMessage(json) ?? `Request failed with status ${response.status}`);
+  }
+};
+
 

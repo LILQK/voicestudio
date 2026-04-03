@@ -1,10 +1,11 @@
-import fs from "node:fs/promises";
+﻿import fs from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { config } from "../config.js";
 import { InputValidationError } from "./qwenErrors.js";
 
 const ALLOWED_VOICE_EXTENSIONS = new Set([".pt", ".pth", ".bin"]);
+const DEFAULT_VOICE_EXTENSION = ".pt";
 
 const hasAllowedVoiceExtension = (fileName: string): boolean =>
   ALLOWED_VOICE_EXTENSIONS.has(path.extname(fileName).toLowerCase());
@@ -27,6 +28,25 @@ const assertValidVoiceName = (voiceName: string): string => {
   return normalized;
 };
 
+const sanitizeVoiceBaseName = (value: string): string => {
+  const withoutExtension = path.basename(value).replace(/\.[^.]+$/, "");
+  const cleaned = withoutExtension
+    .replace(/[^a-zA-Z0-9 _-]+/g, "")
+    .replace(/\s+/g, "_")
+    .replace(/_+/g, "_")
+    .trim()
+    .replace(/^_+|_+$/g, "");
+
+  if (!cleaned) {
+    throw new InputValidationError("Voice name is required");
+  }
+
+  return cleaned;
+};
+
+export const normalizeVoiceTargetName = (value: string): string =>
+  `${sanitizeVoiceBaseName(value)}${DEFAULT_VOICE_EXTENSION}`;
+
 export type VoicePresetItem = {
   name: string;
   size: number;
@@ -35,6 +55,28 @@ export type VoicePresetItem = {
 
 export const ensureVoicesDir = async (): Promise<void> => {
   await fs.mkdir(config.voicesDir, { recursive: true });
+};
+
+const resolveVoicePath = (fileName: string): string => path.join(config.voicesDir, fileName);
+
+const ensureUniqueVoicePath = async (requestedFileName: string): Promise<{ fullPath: string; fileName: string }> => {
+  const parsed = path.parse(requestedFileName);
+  let attempt = 1;
+
+  while (attempt <= 9999) {
+    const candidateName =
+      attempt === 1 ? `${parsed.name}${parsed.ext}` : `${parsed.name}_${attempt}${parsed.ext}`;
+    const candidatePath = resolveVoicePath(candidateName);
+
+    try {
+      await fs.access(candidatePath);
+      attempt += 1;
+    } catch {
+      return { fullPath: candidatePath, fileName: candidateName };
+    }
+  }
+
+  throw new InputValidationError("Unable to generate a unique voice preset name");
 };
 
 const listVoiceFilesInDirectory = async (directory: string): Promise<string[]> => {
@@ -91,6 +133,65 @@ export const listVoicePresets = async (): Promise<VoicePresetItem[]> => {
   return files;
 };
 
+export const saveVoicePresetBuffer = async (
+  requestedName: string,
+  content: Buffer,
+): Promise<VoicePresetItem> => {
+  await ensureVoicesDir();
+  const normalizedName = normalizeVoiceTargetName(requestedName);
+  const { fullPath, fileName } = await ensureUniqueVoicePath(normalizedName);
+  await fs.writeFile(fullPath, content);
+  const stats = await fs.stat(fullPath);
+
+  return {
+    name: fileName,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+  };
+};
+
+export const renameVoicePreset = async (
+  currentVoiceName: string,
+  nextVoiceName: string,
+): Promise<VoicePresetItem> => {
+  await ensureVoicesDir();
+  const safeCurrentName = assertValidVoiceName(currentVoiceName);
+  const sourcePath = resolveVoicePath(safeCurrentName);
+
+  try {
+    await fs.access(sourcePath);
+  } catch {
+    throw new InputValidationError("Voice preset not found", {
+      voiceName: safeCurrentName,
+    });
+  }
+
+  const normalizedTarget = normalizeVoiceTargetName(nextVoiceName);
+  const { fullPath: targetPath, fileName } = await ensureUniqueVoicePath(normalizedTarget);
+  await fs.rename(sourcePath, targetPath);
+  const stats = await fs.stat(targetPath);
+
+  return {
+    name: fileName,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+  };
+};
+
+export const deleteVoicePreset = async (voiceName: string): Promise<void> => {
+  await ensureVoicesDir();
+  const safeName = assertValidVoiceName(voiceName);
+  const targetPath = resolveVoicePath(safeName);
+
+  try {
+    await fs.unlink(targetPath);
+  } catch {
+    throw new InputValidationError("Voice preset not found", {
+      voiceName: safeName,
+    });
+  }
+};
+
 export const loadVoicePresetAsUpload = async (
   voiceName: string,
   fieldName = "audio",
@@ -122,3 +223,4 @@ export const loadVoicePresetAsUpload = async (
     stream: Readable.from(buffer),
   } as Express.Multer.File;
 };
+

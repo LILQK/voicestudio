@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
 import {
   Download,
   Loader2,
@@ -15,15 +15,19 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { VoiceManagerDrawer } from "@/components/voice-manager-drawer";
 import {
+  createVoicePreset,
+  deleteVoicePreset,
   extractGeneratedAudioUrl,
   fetchAudioViaProxy,
   getQwenStatus,
   getVoicePresets,
   loadPromptAndGen,
+  renameVoicePreset as renameVoicePresetApi,
   type QwenState,
+  type VoicePreset,
 } from "@/lib/apiClient";
-
 type ModelItem = {
   id: string;
   name: string;
@@ -211,6 +215,7 @@ const resampleBuffer = async (buffer: AudioBuffer, targetRate: number): Promise<
 function App() {
   const [qwenState, setQwenState] = useState<QwenState | null>(null);
   const [inputText, setInputText] = useState("");
+  const [voicePresets, setVoicePresets] = useState<VoicePreset[]>([]);
   const [models, setModels] = useState<ModelItem[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [paragraphs, setParagraphs] = useState<ParagraphItem[]>([]);
@@ -220,6 +225,7 @@ function App() {
   const [activeParagraphId, setActiveParagraphId] = useState<string | null>(null);
   const [isTimelinePlaying, setIsTimelinePlaying] = useState(false);
   const [timelineCurrentIndex, setTimelineCurrentIndex] = useState<number | null>(null);
+  const [isVoiceManagerOpen, setIsVoiceManagerOpen] = useState(false);
 
   const runIdRef = useRef(0);
   const paragraphsRef = useRef<ParagraphItem[]>([]);
@@ -228,6 +234,20 @@ function App() {
   const currentAudioUrlRef = useRef<string | null>(null);
   const playbackSourceRef = useRef<"manual" | "timeline" | null>(null);
   const timelinePlayingRef = useRef(false);
+
+  const applyPresetModels = useCallback((presets: VoicePreset[]): void => {
+    setVoicePresets(presets);
+    setModels((previous) => {
+      const uploaded = previous.filter((item) => item.source === "uploaded");
+      const presetModels = buildPresetModelItems(presets);
+      return [...presetModels, ...uploaded];
+    });
+  }, []);
+
+  const refreshVoicePresets = useCallback(async (): Promise<void> => {
+    const presets = await getVoicePresets();
+    applyPresetModels(presets);
+  }, [applyPresetModels]);
 
   useEffect(() => {
     paragraphsRef.current = paragraphs;
@@ -289,15 +309,9 @@ function App() {
     const loadDefaultVoices = async (): Promise<void> => {
       try {
         const presets = await getVoicePresets();
-        if (!active) {
-          return;
+        if (active) {
+          applyPresetModels(presets);
         }
-
-        setModels((previous) => {
-          const uploaded = previous.filter((item) => item.source === "uploaded");
-          const presetModels = buildPresetModelItems(presets);
-          return [...presetModels, ...uploaded];
-        });
       } catch {
         if (active) {
           setGlobalError("Unable to load voice presets from /voices.");
@@ -310,7 +324,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyPresetModels]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
@@ -467,6 +481,26 @@ function App() {
     });
 
     event.target.value = "";
+  };
+
+  const onCreateVoicePreset = async (payload: {
+    name: string;
+    transcript: string;
+    file: File;
+  }): Promise<void> => {
+    const formData = new FormData();
+    formData.append("name", payload.name);
+    formData.append("ref_txt", payload.transcript);
+    formData.append("audio", payload.file);
+    await createVoicePreset(formData);
+  };
+
+  const onRenameVoicePreset = async (voiceName: string, newName: string): Promise<void> => {
+    await renameVoicePresetApi(voiceName, newName);
+  };
+
+  const onDeleteVoicePreset = async (voiceName: string): Promise<void> => {
+    await deleteVoicePreset(voiceName);
   };
 
   const updateParagraph = (id: string, updater: (item: ParagraphItem) => ParagraphItem): void => {
@@ -847,6 +881,10 @@ function App() {
               <h1 className="mt-1 text-xl font-semibold">TTS Editor</h1>
             </div>
 
+            <Button variant="outline" className="w-full" onClick={() => setIsVoiceManagerOpen(true)}>
+              Create Voices
+            </Button>
+
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm">Audio model</CardTitle>
@@ -929,7 +967,7 @@ function App() {
                       </span>
                     </TooltipTrigger>
                     {!selectedModel ? (
-                      <TooltipContent>No model selected. Upload and select one to process.</TooltipContent>
+                      <TooltipContent>No model selected. Choose a voice preset to process.</TooltipContent>
                     ) : null}
                   </Tooltip>
                 </div>
@@ -1046,11 +1084,25 @@ function App() {
           </footer>
         </section>
       </div>
+      <VoiceManagerDrawer
+        isOpen={isVoiceManagerOpen}
+        isQwenReady={isQwenReady}
+        voices={voicePresets}
+        onClose={() => setIsVoiceManagerOpen(false)}
+        onRefresh={refreshVoicePresets}
+        onCreate={onCreateVoicePreset}
+        onRename={onRenameVoicePreset}
+        onDelete={onDeleteVoicePreset}
+      />
     </main>
   );
 }
 
 export default App;
+
+
+
+
 
 
 
