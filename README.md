@@ -13,6 +13,8 @@
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
 </p>
 
+![VoiceStudio Demo](./export-1775232093398.gif)
+
 ---
 
 ## Quick Overview
@@ -29,19 +31,6 @@ VoiceStudio has only been tested on **Windows** so far.
 If you run it on Linux or macOS, feel free to share results by opening an issue or contributing improvements.
 
 See contribution guidelines: [CONTRIBUTING.md](./CONTRIBUTING.md)
-
-## Visual Demo
-
-> Recommended: add your own screenshots/GIFs/video here for a polished GitHub showcase.
-
-### Video (walkthrough)
-
-- Full demo: `https://your-demo-link-here`
-
-### Screenshots
-
-![VoiceStudio - Main UI](https://placehold.co/1200x640/0b1220/e6eefb?text=VoiceStudio+Main+UI)
-![VoiceStudio - Voice Manager](https://placehold.co/1200x640/1a2030/e6eefb?text=Voice+Manager+Drawer)
 
 ## Architecture
 
@@ -176,6 +165,11 @@ Note: the server does not kill/stop your Qwen terminal on shutdown.
 3. Process the paragraph queue.
 4. Play results in the timeline.
 5. Export final audio.
+
+## Screenshots
+
+![VoiceStudio - Main UI](./screen1.png)
+![VoiceStudio - Secondary UI](./screen2.png)
 
 ## Optional README Widgets
 
