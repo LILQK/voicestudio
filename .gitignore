@@ -32,3 +32,6 @@ apps/web/node_modules/.vite-temp/
 
 # Misc
 *.tmp
+
+# Local context file
+CONTEXTO_ACTUAL.md
