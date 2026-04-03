@@ -17,6 +17,16 @@
 
 ---
 
+## Why VoiceStudio
+
+VoiceStudio was born as a local alternative to the **ElevenLabs Studio** workflow, focused on users who want more control while staying on top of **Qwen TTS**.
+
+The core idea is simple:
+
+- Split long text into smaller paragraph chunks to get more stable, higher-quality generation results with Qwen.
+- Make paragraph-by-paragraph processing easier to manage and review.
+- Provide a more comfortable production workflow than the original Qwen TTS interface for iterative voice work.
+
 ## Quick Overview
 
 - Modern UI to split text into paragraphs and process them in queue mode.
