@@ -56,6 +56,12 @@ npm run dev
 4. Include test/validation notes in the PR description.
 5. If your change targets Linux/macOS support, include platform test results.
 
+## Contributor License Agreement (Required)
+
+By submitting any contribution (including pull requests and commits), you agree to the project Contributor License Agreement in [CLA.md](./CLA.md).
+
+This is required so the project can legally use, relicense, and distribute contributions (including future commercial distribution) without individual permission requests per contributor.
+
 ## Code Style
 
 - Follow existing project conventions.
