@@ -1,0 +1,16 @@
+{
+  "name": "voicestudio",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -k --names \"server,web\" --prefix \"[{name}]\" \"node apps/server/node_modules/tsx/dist/cli.mjs watch apps/server/src/app.ts\" \"npm run dev --workspace apps/web -- --host 127.0.0.1 --port 5173 --strictPort\"",
+    "build": "npm run build --prefix apps/server && npm run build --prefix apps/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
