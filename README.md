@@ -1,116 +1,117 @@
-﻿# VoiceStudio + Qwen Local Auto Launcher
+﻿# VoiceStudio
 
-Proyecto local con:
-- Backend `Express + TypeScript` para autoarranque y proxy de Qwen.
-- Frontend `React + Vite + shadcn` para estado y pruebas basicas.
+VoiceStudio is a local text-to-speech workspace built around a React UI, an Express proxy server, and a local Qwen TTS runtime.
 
-## Requisitos
+## What this project includes
 
-- Windows + PowerShell
+- `apps/web`: React + Vite frontend (paragraph workflow, generation queue, playback timeline)
+- `apps/server`: Express + TypeScript backend (Qwen health checks + proxy endpoints)
+- Root workspace scripts for running frontend and backend together
+
+## Important: Qwen is NOT included in this repository
+
+The local `qwen/` runtime folder is intentionally excluded from Git.
+You must install Qwen TTS separately (typically via Python package/CLI), then configure this project to launch it.
+
+- Official Qwen3-TTS repo/docs: [https://github.com/QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
+
+## Requirements
+
 - Node.js 20+
-- Qwen instalado localmente (este repo ya incluye una copia en `qwen/`)
+- npm 10+
+- A local Qwen TTS setup running on your machine (or launchable from this project)
 
-## Instalacion
+Typical Python setup example:
 
-```powershell
-cd C:\Users\ethan\OneDrive\Escritorio\voicestudio
+```bash
+python -m venv .venv
+.venv/bin/pip install qwen-tts
+```
+
+## Installation
+
+From project root:
+
+```bash
 npm install
 ```
 
-Copiar variables de entorno:
+Create env files:
 
-```powershell
-Copy-Item .env.example .env
-Copy-Item apps\server\.env.example apps\server\.env
+```bash
+cp .env.example .env
 ```
 
-## Ejecucion (frontend + backend)
+(Use PowerShell `Copy-Item` on Windows if needed.)
 
-```powershell
+## Configuration
+
+Main server config is loaded from root `.env`.
+
+Key variables:
+
+- `QWEN_DIR`: working directory used when launching Qwen
+- `QWEN_START_CMD`: required command used to launch Qwen (you can customize all runtime flags)
+- `QWEN_API_URL`: Qwen API base URL (default `http://127.0.0.1:8000`)
+- `BACKEND_PORT`: backend API port (default `8787`)
+- `STARTUP_TIMEOUT_MS`: max wait time for Qwen readiness
+- `HEALTHCHECK_INTERVAL_MS`: health probe interval
+- `MAX_UPLOAD_MB`, `ALLOWED_AUDIO_MIME`, `ALLOWED_PROMPT_MIME`: upload limits
+
+Example `QWEN_START_CMD`:
+
+```bash
+qwen-tts-demo Qwen/Qwen3-TTS-12Hz-1.7B-Base --device cuda:0 --dtype fp16 --no-flash-attn --ip 127.0.0.1 --port 8000
+```
+
+## Run
+
+Start frontend + backend together:
+
+```bash
 npm run dev
 ```
+
+Default URLs:
 
 - Frontend: `http://127.0.0.1:5173`
 - Backend: `http://127.0.0.1:8787`
 
-## Flujo de arranque automatico
+## How startup works
 
-1. El backend arranca y ejecuta `ensureQwenReady()`.
-2. Hace healthcheck a `QWEN_API_URL` (`/` y fallback `/config`).
-3. Si Qwen ya esta activo, reutiliza instancia.
-4. Si no existe instancia, lanza:
-   - `cmd /c start_qwen3_tts_web.bat Qwen/Qwen3-TTS-12Hz-1.7B-Base`
-   con `cwd=QWEN_DIR`.
-5. Hace reintentos cada `HEALTHCHECK_INTERVAL_MS` hasta `STARTUP_TIMEOUT_MS`.
-6. Expone estado en `GET /api/qwen/status`.
+On backend startup:
 
-Estados:
-- `starting`
-- `ready`
-- `error`
+1. It checks whether Qwen is already reachable at `QWEN_API_URL`.
+2. If reachable, it reuses that running instance.
+3. If not reachable, it launches Qwen in a terminal using `QWEN_START_CMD`.
+4. It keeps probing until Qwen is ready or timeout is reached.
 
-## Endpoints backend proxy
+Note: The server does **not** kill/stop your Qwen terminal on shutdown.
+
+## Backend endpoints
 
 - `GET /api/qwen/status`
 - `POST /api/qwen/run_voice_clone`
 - `POST /api/qwen/save_prompt`
 - `POST /api/qwen/load_prompt_and_gen`
-
-El proxy acepta `multipart/form-data` y JSON. Para archivos valida tipo MIME y tamano maximo.
-
-## Cliente interno frontend
-
-`apps/web/src/lib/apiClient.ts` incluye:
-- `getQwenStatus()`
-- `runVoiceClone(...)`
-- `savePrompt(...)`
-- `loadPromptAndGen(...)`
-
-## Variables de entorno
-
-- `QWEN_DIR`
-- `QWEN_START_CMD`
-- `QWEN_API_URL`
-- `STARTUP_TIMEOUT_MS`
-- `HEALTHCHECK_INTERVAL_MS`
-- `BACKEND_PORT`
-- `MAX_UPLOAD_MB`
-- `ALLOWED_AUDIO_MIME`
-- `ALLOWED_PROMPT_MIME`
+- `GET /api/qwen/audio-file?url=...`
 
 ## Troubleshooting
 
-### 1) Puerto 8000 ocupado
+### Process button is disabled
 
-Sintoma: estado `error` con `PORT_OCCUPIED`.
+Check that:
 
-Accion:
-- cerrar el proceso que ocupa `127.0.0.1:8000`, o
-- cambiar `QWEN_API_URL` a otro puerto valido.
+- A model file is uploaded and selected
+- At least one paragraph exists
+- No generation is currently running
 
-### 2) Timeout de arranque
+### Qwen not ready / startup timeout
 
-Sintoma: `STARTUP_TIMEOUT`.
+- Verify `QWEN_DIR` and `QWEN_START_CMD`
+- Verify your local Qwen installation works when started manually
+- Increase `STARTUP_TIMEOUT_MS` if model boot is slow
 
-Accion:
-- subir `STARTUP_TIMEOUT_MS` (ej. `300000`),
-- verificar GPU/entorno en `qwen/`,
-- lanzar manualmente el `.bat` para validar.
+### Port conflicts
 
-### 3) Error de inferencia
-
-Sintoma: `INFERENCE_ERROR`.
-
-Accion:
-- revisar logs backend,
-- validar payload/campos,
-- comprobar que endpoint exista en Qwen.
-
-### 4) Proceso caido
-
-Si Qwen cae, proxys siguientes devolveran error tecnico. Reiniciar `npm run dev` o levantar Qwen manualmente.
-
-## Cierre limpio
-
-Si el backend lanzo Qwen, al terminar backend intenta cerrar el PID escuchando en el puerto de Qwen (`taskkill /T /F`).
-Si Qwen ya estaba abierto externamente, no se mata.
+If `QWEN_API_URL` port is already used by a non-Qwen process, change the port or free it.

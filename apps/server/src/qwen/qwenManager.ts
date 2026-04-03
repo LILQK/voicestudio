@@ -3,7 +3,6 @@ import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { PortOccupiedError, QwenProcessError, StartupTimeoutError } from "./qwenErrors.js";
 import { checkQwenHealth, isPortOpen, parseApiUrl } from "./qwenHealth.js";
-import { getPidByPort, killPidTree } from "./processUtils.js";
 
 export type QwenStatus = "starting" | "ready" | "error";
 
@@ -27,8 +26,6 @@ class QwenManager {
   };
 
   private startupPromise: Promise<void> | null = null;
-  private launchedPid: number | null = null;
-  private shutdownInProgress = false;
 
   getState(): QwenState {
     return this.state;
@@ -50,33 +47,6 @@ class QwenManager {
     }
   }
 
-  async shutdown(): Promise<void> {
-    if (!this.state.launchedByApp || this.shutdownInProgress) {
-      return;
-    }
-
-    this.shutdownInProgress = true;
-    try {
-      const { port } = parseApiUrl(config.qwenApiUrl);
-      const pidFromPort = await getPidByPort(port);
-      const pids = [...new Set([this.launchedPid, pidFromPort].filter((pid): pid is number => Boolean(pid)))];
-
-      for (const pid of pids) {
-        logger.info("Stopping Qwen process tree", { pid });
-        try {
-          await killPidTree(pid);
-        } catch (error) {
-          logger.warn("Unable to stop Qwen process tree", {
-            pid,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-    } finally {
-      this.shutdownInProgress = false;
-    }
-  }
-
   private setError(message: string): void {
     this.state = {
       ...this.state,
@@ -85,16 +55,34 @@ class QwenManager {
     };
   }
 
-  private parseStartCommand(command: string): { file: string; args: string[] } {
+  private parseStartCommand(command: string): { file: string; args: string[]; cwd?: string } {
     const normalized = command.trim();
-    const cmdPrefix = /^cmd(\.exe)?\s+\/c\s+/i;
-    const stripped = cmdPrefix.test(normalized) ? normalized.replace(cmdPrefix, "").trim() : normalized;
+    if (process.platform === "win32") {
+      const cmdPrefix = /^cmd(\.exe)?\s+\/c\s+/i;
+      const stripped = cmdPrefix.test(normalized) ? normalized.replace(cmdPrefix, "").trim() : normalized;
+      return {
+        file: "cmd.exe",
+        // Open a visible terminal window and keep it open with /k.
+        args: ["/d", "/c", "start", "", "cmd.exe", "/k", stripped],
+      };
+    }
 
+    const escapedDir = config.qwenDir.replace(/"/g, '\\"');
+    const escapedCmd = normalized.replace(/"/g, '\\"');
+    const shellLine = `cd "${escapedDir}"; ${escapedCmd}`;
+
+    if (process.platform === "darwin") {
+      const appleScript = `tell application "Terminal" to do script "${shellLine.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+      return {
+        file: "osascript",
+        args: ["-e", appleScript],
+      };
+    }
+
+    // Linux / other Unix-like: prefer system terminal launcher.
     return {
-      file: "cmd.exe",
-      // Open a visible terminal window and keep it open with /k.
-      // Using argv tokens avoids fragile quoting/parsing issues on Windows.
-      args: ["/d", "/c", "start", "", "cmd.exe", "/k", stripped],
+      file: "x-terminal-emulator",
+      args: ["-e", "bash", "-lc", `${shellLine}; exec bash`],
     };
   }
 
@@ -138,7 +126,7 @@ class QwenManager {
 
     const launch = this.parseStartCommand(config.qwenStartCmd);
     const child = spawn(launch.file, launch.args, {
-      cwd: config.qwenDir,
+      cwd: launch.cwd ?? config.qwenDir,
       shell: false,
       detached: false,
       stdio: "ignore",
@@ -146,7 +134,6 @@ class QwenManager {
       env: process.env,
     });
     child.unref();
-    this.launchedPid = child.pid ?? null;
 
     child.on("error", (error) => {
       this.setError(error.message);
@@ -174,10 +161,6 @@ class QwenManager {
       });
 
       if (probe.isReachable && probe.isQwenGradio) {
-        const pidFromPort = await getPidByPort(urlData.port);
-        if (pidFromPort) {
-          this.launchedPid = pidFromPort;
-        }
         this.state = {
           ...this.state,
           status: "ready",
@@ -185,7 +168,6 @@ class QwenManager {
           startupElapsedMs: Date.now() - startupStart,
         };
         logger.info("Qwen is ready", {
-          pid: this.launchedPid,
           startupElapsedMs: this.state.startupElapsedMs,
         });
         return;
@@ -203,20 +185,6 @@ class QwenManager {
 export const qwenManager = new QwenManager();
 
 export const registerProcessHooks = (): void => {
-  const gracefulShutdown = async (signal: string): Promise<void> => {
-    logger.info(`Received ${signal}, shutting down.`);
-    await qwenManager.shutdown();
-    process.exit(0);
-  };
-
-  process.on("SIGINT", () => {
-    void gracefulShutdown("SIGINT");
-  });
-
-  process.on("SIGTERM", () => {
-    void gracefulShutdown("SIGTERM");
-  });
-
   process.on("uncaughtException", (error) => {
     logger.error("Uncaught exception", error.message);
   });

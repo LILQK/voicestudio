@@ -14,14 +14,20 @@ const splitCsv = (value: string | undefined): string[] =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const requiredEnv = (name: string): string => {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+};
+
+const resolvedQwenDir = process.env.QWEN_DIR ?? process.cwd();
+
 export const config = {
   backendPort: toNumber(process.env.BACKEND_PORT, 8787),
-  qwenDir:
-    process.env.QWEN_DIR ??
-    "C:\\Users\\ethan\\OneDrive\\Escritorio\\voicestudio\\qwen",
-  qwenStartCmd:
-    process.env.QWEN_START_CMD ??
-    "cmd /c start_qwen3_tts_web.bat Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+  qwenDir: resolvedQwenDir,
+  qwenStartCmd: requiredEnv("QWEN_START_CMD"),
   qwenApiUrl: process.env.QWEN_API_URL ?? "http://127.0.0.1:8000",
   startupTimeoutMs: toNumber(process.env.STARTUP_TIMEOUT_MS, 180000),
   healthcheckIntervalMs: toNumber(process.env.HEALTHCHECK_INTERVAL_MS, 1500),
