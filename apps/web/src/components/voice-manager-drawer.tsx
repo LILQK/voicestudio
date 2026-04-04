@@ -31,8 +31,11 @@ type VoiceManagerDrawerProps = {
   isOpen: boolean;
   isQwenReady: boolean;
   voices: VoicePreset[];
+  selectedVoiceModelId: string;
+  onSelectVoicePreset: (voiceName: string) => void;
   onClose: () => void;
   onRefresh: () => Promise<void>;
+  onUploadModels: (files: File[]) => void;
   onCreate: (payload: CreateVoicePayload) => Promise<void>;
   onRename: (voiceName: string, newName: string) => Promise<void>;
   onDelete: (voiceName: string) => Promise<void>;
@@ -42,12 +45,17 @@ export function VoiceManagerDrawer({
   isOpen,
   isQwenReady,
   voices,
+  selectedVoiceModelId,
+  onSelectVoicePreset,
   onClose,
   onRefresh,
+  onUploadModels,
   onCreate,
   onRename,
   onDelete,
 }: VoiceManagerDrawerProps) {
+  const [activeTab, setActiveTab] = useState<"voices" | "new">("voices");
+  const [searchTerm, setSearchTerm] = useState("");
   const [voiceName, setVoiceName] = useState("");
   const [transcript, setTranscript] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -65,6 +73,8 @@ export function VoiceManagerDrawer({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const modelUploadInputRef = useRef<HTMLInputElement | null>(null);
+  const [modelUploadInfo, setModelUploadInfo] = useState<string | null>(null);
 
   const selectedFileLabel = useMemo(() => {
     if (!selectedFile) {
@@ -102,11 +112,21 @@ export function VoiceManagerDrawer({
 
   useEffect(() => {
     if (isOpen) {
+      setActiveTab("voices");
+      setSearchTerm("");
       return;
     }
 
     stopRecordingIfNeeded();
   }, [isOpen]);
+
+  const filteredVoices = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) {
+      return voices;
+    }
+    return voices.filter((voice) => voice.name.toLowerCase().includes(query));
+  }, [voices, searchTerm]);
 
   useEffect(() => {
     return () => {
@@ -119,6 +139,19 @@ export function VoiceManagerDrawer({
     setSelectedFile(file);
     setCreateError(null);
     setCreateSuccess(null);
+  };
+
+  const onModelFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    const files = Array.from(event.target.files ?? []);
+    onUploadModels(files);
+    if (files.length > 0) {
+      setModelUploadInfo(
+        files.length === 1
+          ? `Uploaded model: ${files[0].name}`
+          : `Uploaded ${files.length} model files.`,
+      );
+    }
+    event.target.value = "";
   };
 
   const onStartRecording = async (): Promise<void> => {
@@ -288,193 +321,261 @@ export function VoiceManagerDrawer({
       >
         <header className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
-            <h2 className="text-base font-semibold">Create Voices</h2>
-            <p className="text-xs text-muted-foreground">Create, rename, and delete preset `.pt` voices.</p>
+            <h2 className="text-base font-semibold">Voice Manager</h2>
+            <p className="text-xs text-muted-foreground">Select, create, rename, and delete preset voices.</p>
           </div>
           <Button type="button" variant="ghost" size="icon" onClick={onClose}>
             <X />
           </Button>
         </header>
 
-        <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4">
-          <section className="space-y-3">
-            <h3 className="text-sm font-semibold">Create Voice Preset</h3>
-
-            {!isQwenReady ? (
-              <Alert variant="destructive">
-                <AlertTitle>Qwen not ready</AlertTitle>
-                <AlertDescription>Wait for Qwen to be ready before creating voices.</AlertDescription>
-              </Alert>
-            ) : null}
-
-            {createError ? (
-              <Alert variant="destructive">
-                <AlertTitle>Create failed</AlertTitle>
-                <AlertDescription>{createError}</AlertDescription>
-              </Alert>
-            ) : null}
-
-            {createSuccess ? (
-              <Alert>
-                <AlertTitle>Done</AlertTitle>
-                <AlertDescription>{createSuccess}</AlertDescription>
-              </Alert>
-            ) : null}
-
-            <div className="space-y-2">
-              <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground" htmlFor="voice-name">
-                Voice Name
-              </label>
-              <Input
-                id="voice-name"
-                value={voiceName}
-                onChange={(event) => setVoiceName(event.target.value)}
-                placeholder="James default english"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground" htmlFor="voice-transcript">
-                Reference Transcript
-              </label>
-              <Textarea
-                id="voice-transcript"
-                className="min-h-24"
-                value={transcript}
-                onChange={(event) => setTranscript(event.target.value)}
-                placeholder="Type exactly what the reference audio says"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground" htmlFor="voice-audio-file">
-                Reference Audio
-              </label>
-              <Input
-                id="voice-audio-file"
-                type="file"
-                accept="audio/*,.wav,.mp3,.flac,.webm,.m4a,.ogg"
-                onChange={onFileChange}
-              />
-              <p className="text-xs text-muted-foreground">Selected: {selectedFileLabel}</p>
-
-              <div className="flex items-center gap-2">
-                <Button type="button" variant="outline" onClick={() => void onStartRecording()} disabled={isRecording}>
-                  <Mic />
-                  Record
-                </Button>
-                <Button type="button" variant="outline" onClick={onStopRecording} disabled={!isRecording}>
-                  <Square />
-                  Stop
-                </Button>
-              </div>
-            </div>
-
+        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+          <div className="grid grid-cols-2 rounded-md border border-border p-1">
             <Button
               type="button"
-              className="w-full"
-              disabled={isCreating || !isQwenReady}
-              onClick={() => void onCreateVoice()}
+              variant={activeTab === "voices" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setActiveTab("voices")}
             >
-              {isCreating ? <RotateCw className="animate-spin" /> : <Upload />}
-              Create Voice
+              Voices
             </Button>
-          </section>
+            <Button
+              type="button"
+              variant={activeTab === "new" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setActiveTab("new")}
+            >
+              New Voice
+            </Button>
+          </div>
 
-          <section className="space-y-3 pb-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold">Voice Presets</h3>
-              <Button type="button" variant="ghost" size="sm" onClick={() => void onRefresh()}>
-                <RotateCw />
-                Refresh
-              </Button>
-            </div>
+          {activeTab === "voices" ? (
+            <section className="space-y-3 pb-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold">Voice Presets</h3>
+                <Button type="button" variant="ghost" size="sm" onClick={() => void onRefresh()}>
+                  <RotateCw />
+                  Refresh
+                </Button>
+              </div>
 
-            {managerError ? (
-              <Alert variant="destructive">
-                <AlertTitle>Operation failed</AlertTitle>
-                <AlertDescription>{managerError}</AlertDescription>
-              </Alert>
-            ) : null}
+              <Input
+                value={searchTerm}
+                onChange={(event) => setSearchTerm(event.target.value)}
+                placeholder="Search voices..."
+              />
 
-            <div className="space-y-2">
-              {voices.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No voice presets found.</p>
-              ) : (
-                voices.map((voice) => {
-                  const isEditing = editingVoiceName === voice.name;
-                  const isBusy = busyVoiceName === voice.name;
+              {managerError ? (
+                <Alert variant="destructive">
+                  <AlertTitle>Operation failed</AlertTitle>
+                  <AlertDescription>{managerError}</AlertDescription>
+                </Alert>
+              ) : null}
 
-                  return (
-                    <article
-                      key={voice.name}
-                      className="rounded-lg border border-border bg-muted/40 p-3"
-                    >
-                      {!isEditing ? (
-                        <div className="space-y-2">
-                          <p className="text-sm font-medium">{voice.name}</p>
-                          <p className="text-xs text-muted-foreground">{(voice.size / 1024).toFixed(1)} KB</p>
-                          <div className="flex items-center gap-2">
-                            <Button
+              <div className="space-y-2">
+                {filteredVoices.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No voice presets found.</p>
+                ) : (
+                  filteredVoices.map((voice) => {
+                    const isEditing = editingVoiceName === voice.name;
+                    const isBusy = busyVoiceName === voice.name;
+                    const isSelected = selectedVoiceModelId === `preset:${voice.name}`;
+
+                    return (
+                      <article
+                        key={voice.name}
+                        className={cn(
+                          "rounded-lg border border-border bg-muted/40 p-3",
+                          isSelected ? "border-primary/70 bg-primary/5" : "",
+                        )}
+                      >
+                        {!isEditing ? (
+                          <div className="space-y-2">
+                            <button
                               type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={isBusy}
-                              onClick={() => onRenameStart(voice)}
-                            >
-                              <Pencil />
-                              Rename
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              disabled={isBusy}
-                              onClick={() => void onDeleteClick(voice.name)}
-                            >
-                              <Trash2 />
-                              Delete
-                            </Button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          <Input
-                            value={editingTargetName}
-                            onChange={(event) => setEditingTargetName(event.target.value)}
-                            disabled={isBusy}
-                          />
-                          <div className="flex items-center gap-2">
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={isBusy}
-                              onClick={() => void onRenameSave(voice.name)}
-                            >
-                              {isBusy ? <RotateCw className="animate-spin" /> : <Pencil />}
-                              Save
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              disabled={isBusy}
+                              className="w-full text-left"
                               onClick={() => {
-                                setEditingVoiceName(null);
-                                setEditingTargetName("");
+                                onSelectVoicePreset(voice.name);
+                                onClose();
                               }}
                             >
-                              Cancel
-                            </Button>
+                              <p className="text-sm font-medium">{voice.name}</p>
+                              <p className="text-xs text-muted-foreground">{(voice.size / 1024).toFixed(1)} KB</p>
+                            </button>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={isBusy}
+                                onClick={() => onRenameStart(voice)}
+                              >
+                                <Pencil />
+                                Rename
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                disabled={isBusy}
+                                onClick={() => void onDeleteClick(voice.name)}
+                              >
+                                <Trash2 />
+                                Delete
+                              </Button>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                    </article>
-                  );
-                })
-              )}
-            </div>
-          </section>
+                        ) : (
+                          <div className="space-y-2">
+                            <Input
+                              value={editingTargetName}
+                              onChange={(event) => setEditingTargetName(event.target.value)}
+                              disabled={isBusy}
+                            />
+                            <div className="flex items-center gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={isBusy}
+                                onClick={() => void onRenameSave(voice.name)}
+                              >
+                                {isBusy ? <RotateCw className="animate-spin" /> : <Pencil />}
+                                Save
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                disabled={isBusy}
+                                onClick={() => {
+                                  setEditingVoiceName(null);
+                                  setEditingTargetName("");
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </article>
+                    );
+                  })
+                )}
+              </div>
+            </section>
+          ) : (
+            <section className="space-y-3">
+              <h3 className="text-sm font-semibold">Create Voice Preset</h3>
+
+              {!isQwenReady ? (
+                <Alert variant="destructive">
+                  <AlertTitle>Qwen not ready</AlertTitle>
+                  <AlertDescription>Wait for Qwen to be ready before creating voices.</AlertDescription>
+                </Alert>
+              ) : null}
+
+              {createError ? (
+                <Alert variant="destructive">
+                  <AlertTitle>Create failed</AlertTitle>
+                  <AlertDescription>{createError}</AlertDescription>
+                </Alert>
+              ) : null}
+
+              {createSuccess ? (
+                <Alert>
+                  <AlertTitle>Done</AlertTitle>
+                  <AlertDescription>{createSuccess}</AlertDescription>
+                </Alert>
+              ) : null}
+
+              <div className="space-y-2">
+                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground" htmlFor="voice-name">
+                  Voice Name
+                </label>
+                <Input
+                  id="voice-name"
+                  value={voiceName}
+                  onChange={(event) => setVoiceName(event.target.value)}
+                  placeholder="James default english"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground" htmlFor="voice-transcript">
+                  Reference Transcript
+                </label>
+                <Textarea
+                  id="voice-transcript"
+                  className="min-h-24"
+                  value={transcript}
+                  onChange={(event) => setTranscript(event.target.value)}
+                  placeholder="Type exactly what the reference audio says"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground" htmlFor="voice-audio-file">
+                  Reference Audio
+                </label>
+                <Input
+                  id="voice-audio-file"
+                  type="file"
+                  accept="audio/*,.wav,.mp3,.flac,.webm,.m4a,.ogg"
+                  onChange={onFileChange}
+                />
+                <p className="text-xs text-muted-foreground">Selected: {selectedFileLabel}</p>
+
+                <div className="flex items-center gap-2">
+                  <Button type="button" variant="outline" onClick={() => void onStartRecording()} disabled={isRecording}>
+                    <Mic />
+                    Record
+                  </Button>
+                  <Button type="button" variant="outline" onClick={onStopRecording} disabled={!isRecording}>
+                    <Square />
+                    Stop
+                  </Button>
+                </div>
+              </div>
+
+              <Button
+                type="button"
+                className="w-full"
+                disabled={isCreating || !isQwenReady}
+                onClick={() => void onCreateVoice()}
+              >
+                {isCreating ? <RotateCw className="animate-spin" /> : <Upload />}
+                Create Voice
+              </Button>
+
+              <div className="relative my-2 py-2">
+                <div className="h-px w-full bg-border" />
+                <span className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-background px-2 text-xs uppercase tracking-wide text-muted-foreground">
+                  or
+                </span>
+              </div>
+
+              <section className="space-y-2">
+                <h3 className="text-sm font-semibold">Upload Voice Model</h3>
+                <input
+                  ref={modelUploadInputRef}
+                  type="file"
+                  accept=".pt,.pth,.bin"
+                  multiple
+                  className="hidden"
+                  onChange={onModelFileChange}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => modelUploadInputRef.current?.click()}
+                >
+                  <Upload />
+                  Upload model (.pt/.pth/.bin)
+                </Button>
+                {modelUploadInfo ? <p className="text-xs text-muted-foreground">{modelUploadInfo}</p> : null}
+              </section>
+            </section>
+          )}
         </div>
       </aside>
     </>

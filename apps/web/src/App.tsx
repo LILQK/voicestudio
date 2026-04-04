@@ -1,6 +1,6 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
-  ChevronDown,
+  ChevronRight,
   MoreHorizontal,
   Download,
   Loader2,
@@ -85,7 +85,6 @@ type DisplayProjectItem = ProjectHistoryItem & { isTransient?: boolean };
 const MAX_SEGMENT_CHARACTERS = 320;
 const AUTO_SPLIT_DELAY_MS = 1800;
 const ACCEPTED_MODEL_EXTENSIONS = new Set([".pt", ".pth", ".bin"]);
-
 const PRESET_MODEL_ID_PREFIX = "preset:";
 
 const createId = (): string =>
@@ -361,6 +360,10 @@ function App() {
     const presets = await getVoicePresets();
     applyPresetModels(presets);
   }, [applyPresetModels]);
+
+  const onSelectVoicePreset = (voiceName: string): void => {
+    setSelectedModelId(`${PRESET_MODEL_ID_PREFIX}${voiceName}`);
+  };
 
   useEffect(() => {
     let active = true;
@@ -832,8 +835,19 @@ function App() {
     };
   }, [inputText, generationStatus, selectedModelId]);
 
-  const onAddModels = (event: ChangeEvent<HTMLInputElement>): void => {
-    const files = Array.from(event.target.files ?? []);
+  const onCreateVoicePreset = async (payload: {
+    name: string;
+    transcript: string;
+    file: File;
+  }): Promise<void> => {
+    const formData = new FormData();
+    formData.append("name", payload.name);
+    formData.append("ref_txt", payload.transcript);
+    formData.append("audio", payload.file);
+    await createVoicePreset(formData);
+  };
+
+  const onUploadVoiceModels = (files: File[]): void => {
     if (files.length === 0) {
       return;
     }
@@ -859,6 +873,7 @@ function App() {
           .filter((item) => item.source === "uploaded")
           .map((item) => `${item.name}-${item.size}`),
       );
+
       const additions = validFiles
         .filter((file) => !signatures.has(`${file.name}-${file.size}`))
         .map<ModelItem>((file) => ({
@@ -875,20 +890,6 @@ function App() {
       }
       return merged;
     });
-
-    event.target.value = "";
-  };
-
-  const onCreateVoicePreset = async (payload: {
-    name: string;
-    transcript: string;
-    file: File;
-  }): Promise<void> => {
-    const formData = new FormData();
-    formData.append("name", payload.name);
-    formData.append("ref_txt", payload.transcript);
-    formData.append("audio", payload.file);
-    await createVoicePreset(formData);
   };
 
   const onRenameVoicePreset = async (voiceName: string, newName: string): Promise<void> => {
@@ -1760,35 +1761,15 @@ function App() {
                 <CardTitle className="text-sm">Audio model</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Input type="file" accept=".pt,.pth,.bin" multiple onChange={onAddModels} />
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full justify-between font-normal"
-                      disabled={models.length === 0 || generationStatus === "running"}
-                    >
-                      <span className="truncate">
-                        {selectedModel?.name ?? "Select a model"}
-                      </span>
-                      <ChevronDown className="size-4 text-muted-foreground" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="start" className="w-[var(--radix-dropdown-menu-trigger-width)]">
-                    <DropdownMenuLabel className="text-xs text-muted-foreground">Available voice models</DropdownMenuLabel>
-                    <DropdownMenuRadioGroup
-                      value={selectedModelId || selectedModel?.id || ""}
-                      onValueChange={(value: string) => setSelectedModelId(value)}
-                    >
-                      {models.map((model) => (
-                        <DropdownMenuRadioItem key={model.id} value={model.id}>
-                          {model.name}
-                        </DropdownMenuRadioItem>
-                      ))}
-                    </DropdownMenuRadioGroup>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full justify-between font-normal"
+                  onClick={() => setIsVoiceManagerOpen(true)}
+                >
+                  <span className="truncate">{selectedModel?.name ?? "Select voice model"}</span>
+                  <ChevronRight className="size-4 text-muted-foreground" />
+                </Button>
                 {selectedModel ? (
                   <div className="rounded-md border border-border/80 bg-muted/60 p-2 text-xs">
                     <p className="font-medium">Active: {selectedModel.name}</p>
@@ -1799,12 +1780,9 @@ function App() {
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground">
-                    No voices found in `/voices`. Upload one or add `.pt/.pth/.bin` files there.
+                    No voices found in `/voices`. Open the voice panel to create one.
                   </p>
                 )}
-                <Button variant="outline" className="w-full" onClick={() => setIsVoiceManagerOpen(true)}>
-                  Create Voices
-                </Button>
               </CardContent>
             </Card>
 
@@ -2049,8 +2027,11 @@ function App() {
         isOpen={isVoiceManagerOpen}
         isQwenReady={isQwenReady}
         voices={voicePresets}
+        selectedVoiceModelId={selectedModelId}
+        onSelectVoicePreset={onSelectVoicePreset}
         onClose={() => setIsVoiceManagerOpen(false)}
         onRefresh={refreshVoicePresets}
+        onUploadModels={onUploadVoiceModels}
         onCreate={onCreateVoicePreset}
         onRename={onRenameVoicePreset}
         onDelete={onDeleteVoicePreset}
@@ -2060,6 +2041,8 @@ function App() {
 }
 
 export default App;
+
+
 
 
 
