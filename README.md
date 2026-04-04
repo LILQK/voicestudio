@@ -30,6 +30,7 @@ The core idea is simple:
 ## Quick Overview
 
 - Modern UI to split text into paragraphs and process them in queue mode.
+- Per-paragraph speaker assignment (podcast/conversation flow) with clickable speaker avatars.
 - Playback timeline and final audio export.
 - Voice preset library (create, rename, delete).
 - Backend with Qwen health checks and auto-start orchestration.
@@ -172,23 +173,15 @@ Note: the server does not kill/stop your Qwen terminal on shutdown.
 
 1. Upload or select a model/preset.
 2. Paste text (it is automatically split into paragraphs).
-3. Process the paragraph queue.
-4. Play results in the timeline.
-5. Export final audio.
+3. (Optional) assign different speakers per paragraph.
+4. Process the paragraph queue.
+5. Play results in the timeline.
+6. Export final audio.
 
 ## Screenshots
 
 ![VoiceStudio - Main UI](./screen1.png)
 ![VoiceStudio - Secondary UI](./screen2.png)
-
-## Optional README Widgets
-
-You can add these to make the README more dynamic:
-
-- Build/test/version badges with Shields.
-- Screenshot carousel (GIF or short video).
-- CTA button: `Watch Demo`.
-- Roadmap/status cards.
 
 ## License
 

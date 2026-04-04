@@ -25,3 +25,9 @@ Short log of mistakes that were found and corrected, so they are not repeated.
 - Mistake: Seeking while audio was playing could leave stale callbacks and overlapping audio.
 - Fix: Added request invalidation/guards and pause/resume control during scrub.
 - Prevention: For media seek features, always test rapid drag interactions and guard async callbacks.
+
+## 2026-04-04 - Preserve paragraph metadata on re-segmentation
+- Context: Added per-paragraph speaker assignment.
+- Mistake: New paragraph splitting logic could recreate paragraph items without carrying speaker metadata.
+- Fix: Initialized `speakerModelId`/`speakerOverridden` for new paragraphs and preserved previous items when text matches.
+- Prevention: When adding paragraph-level features, audit all `setParagraphs` paths to ensure metadata survives edits and auto-split.

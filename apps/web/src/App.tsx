@@ -10,9 +10,18 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select } from "@/components/ui/select";
+import { SpeakerAvatar } from "@/components/ui/speaker-avatar";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -43,6 +52,8 @@ type ParagraphStatus = "pending" | "generating" | "ok" | "error";
 type ParagraphItem = {
   id: string;
   text: string;
+  speakerModelId: string;
+  speakerOverridden: boolean;
   status: ParagraphStatus;
   audioUrl?: string;
   audioBlob?: Blob;
@@ -370,6 +381,30 @@ function App() {
     }
   }, [models, selectedModelId]);
 
+  useEffect(() => {
+    if (!selectedModelId) {
+      return;
+    }
+
+    setParagraphs((previous) => {
+      let changed = false;
+      const next = previous.map((item) => {
+        if (item.speakerModelId) {
+          return item;
+        }
+
+        changed = true;
+        return {
+          ...item,
+          speakerModelId: selectedModelId,
+          speakerOverridden: false,
+        };
+      });
+
+      return changed ? next : previous;
+    });
+  }, [selectedModelId]);
+
   const canExport =
     generationStatus !== "running" &&
     !isExporting &&
@@ -581,6 +616,8 @@ function App() {
           return {
             id: createId(),
             text,
+            speakerModelId: selectedModelId,
+            speakerOverridden: false,
             status: "pending",
           };
         });
@@ -592,7 +629,7 @@ function App() {
     return () => {
       clearTimeout(timeout);
     };
-  }, [inputText, generationStatus]);
+  }, [inputText, generationStatus, selectedModelId]);
 
   const onAddModels = (event: ChangeEvent<HTMLInputElement>): void => {
     const files = Array.from(event.target.files ?? []);
@@ -666,11 +703,29 @@ function App() {
   };
 
   const generateSingleParagraph = async (id: string, runId: number): Promise<boolean> => {
-    const activeModel = selectedModel;
     const target = paragraphsRef.current.find((item) => item.id === id);
-
-    if (!activeModel || !target) {
+    if (!target) {
       return false;
+    }
+
+    const assignedModel = models.find((item) => item.id === target.speakerModelId);
+    const activeModel = assignedModel ?? selectedModel;
+
+    if (!activeModel) {
+      updateParagraph(id, (item) => ({
+        ...item,
+        status: "error",
+        error: "No valid voice model is available for this paragraph.",
+      }));
+      return false;
+    }
+
+    if (!assignedModel && target.speakerModelId) {
+      updateParagraph(id, (item) => ({
+        ...item,
+        speakerModelId: activeModel.id,
+        speakerOverridden: false,
+      }));
     }
 
     if (!target.text.trim()) {
@@ -810,6 +865,24 @@ function App() {
       setInputText(next.map((paragraph) => paragraph.text).join("\n\n"));
       return next;
     });
+  };
+
+  const onParagraphSpeakerChange = (id: string, modelId: string): void => {
+    setParagraphs((previous) =>
+      previous.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              speakerModelId: modelId,
+              speakerOverridden: modelId !== selectedModelId,
+              status: "pending" as const,
+              error: undefined,
+              audioUrl: undefined,
+              audioBlob: undefined,
+            }
+          : item,
+      ),
+    );
   };
 
   const onParagraphClick = (id: string, event: MouseEvent<HTMLTextAreaElement>): void => {
@@ -1376,6 +1449,48 @@ function App() {
                               </div>
                             </PopoverContent>
 
+                            <div className="absolute -left-10 top-1/2 z-10 -translate-y-1/2">
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <button
+                                    type="button"
+                                    disabled={generationStatus === "running" || models.length === 0}
+                                    className="rounded-full transition-transform hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50"
+                                    aria-label="Change paragraph speaker"
+                                  >
+                                    <SpeakerAvatar
+                                      name={
+                                        models.find((model) => model.id === item.speakerModelId)?.name ??
+                                        selectedModel?.name ??
+                                        "Voice"
+                                      }
+                                    />
+                                  </button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent side="right" align="start" className="w-56">
+                                  <DropdownMenuLabel className="text-xs text-muted-foreground">
+                                    Paragraph speaker
+                                  </DropdownMenuLabel>
+                                  <DropdownMenuRadioGroup
+                                    value={
+                                      models.some((model) => model.id === item.speakerModelId)
+                                        ? item.speakerModelId
+                                        : selectedModel?.id ?? ""
+                                    }
+                                    onValueChange={(nextValue: string) =>
+                                      onParagraphSpeakerChange(item.id, nextValue)
+                                    }
+                                  >
+                                    {models.map((model) => (
+                                      <DropdownMenuRadioItem key={model.id} value={model.id}>
+                                        {model.name}
+                                      </DropdownMenuRadioItem>
+                                    ))}
+                                  </DropdownMenuRadioGroup>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+
                             <span
                               className={`pointer-events-none absolute bottom-2 left-0 top-2 w-[3px] rounded-full ${paragraphStripClass[item.status]}`}
                               aria-hidden
@@ -1385,7 +1500,7 @@ function App() {
                             ) : null}
 
                             <Textarea
-                              className={`min-h-16 resize-none border-0 bg-transparent px-0 pr-5 shadow-none outline-none selection:bg-sky-200 selection:text-foreground focus-visible:ring-0 ${
+                              className={`min-h-16 resize-none border-0 bg-transparent px-0 pr-5 pl-7 shadow-none outline-none selection:bg-sky-200 selection:text-foreground focus-visible:ring-0 ${
                                 generationStatus === "running" && item.status === "ok"
                                   ? "cursor-pointer"
                                   : ""
