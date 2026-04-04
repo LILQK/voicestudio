@@ -29,6 +29,7 @@ apps/web/node_modules/.vite-temp/
 
 # Local assets / models (root only)
 /qwen/
+/voices/
 
 # Misc
 *.tmp

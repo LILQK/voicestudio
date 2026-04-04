@@ -86,14 +86,14 @@ const listVoiceFilesInDirectory = async (directory: string): Promise<string[]> =
     .map((entry) => entry.name);
 };
 
-export const syncDefaultVoicesFromQwen = async (): Promise<string[]> => {
+export const syncDefaultVoices = async (): Promise<string[]> => {
   await ensureVoicesDir();
   let copied: string[] = [];
 
   try {
-    const sourceFiles = await listVoiceFilesInDirectory(config.qwenDir);
+    const sourceFiles = await listVoiceFilesInDirectory(config.defaultVoicesDir);
     for (const fileName of sourceFiles) {
-      const sourcePath = path.join(config.qwenDir, fileName);
+      const sourcePath = path.join(config.defaultVoicesDir, fileName);
       const targetPath = path.join(config.voicesDir, fileName);
       try {
         await fs.access(targetPath);
@@ -103,7 +103,7 @@ export const syncDefaultVoicesFromQwen = async (): Promise<string[]> => {
       }
     }
   } catch {
-    // If qwen dir does not exist or cannot be read, we keep voices dir as-is.
+    // If default voices dir does not exist or cannot be read, we keep voices dir as-is.
   }
 
   return copied;
@@ -111,7 +111,7 @@ export const syncDefaultVoicesFromQwen = async (): Promise<string[]> => {
 
 export const listVoicePresets = async (): Promise<VoicePresetItem[]> => {
   await ensureVoicesDir();
-  await syncDefaultVoicesFromQwen();
+  await syncDefaultVoices();
 
   const entries = await fs.readdir(config.voicesDir, { withFileTypes: true });
   const files: VoicePresetItem[] = [];
