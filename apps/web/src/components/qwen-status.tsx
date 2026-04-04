@@ -16,25 +16,25 @@ export function QwenStatusCard({ state }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg">Estado de Qwen</CardTitle>
+        <CardTitle className="text-lg">Qwen Status</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         {state ? (
           <>
             <div className="flex items-center gap-2">
-              <span className="font-medium">Estado:</span>
+              <span className="font-medium">Status:</span>
               <Badge variant={statusVariant[state.status]}>{state.status}</Badge>
             </div>
             <p>API: {state.apiUrl}</p>
-            <p>Lanzado por app: {state.launchedByApp ? "si" : "no"}</p>
-            <p>Reintentos: {state.attempts}</p>
-            <p>Tiempo arranque: {state.startupElapsedMs} ms</p>
+            <p>Launched by app: {state.launchedByApp ? "yes" : "no"}</p>
+            <p>Retries: {state.attempts}</p>
+            <p>Startup time: {state.startupElapsedMs} ms</p>
             {state.lastError ? (
-              <p className="text-destructive">Ultimo error: {state.lastError}</p>
+              <p className="text-destructive">Last error: {state.lastError}</p>
             ) : null}
           </>
         ) : (
-          <p>Cargando estado...</p>
+          <p>Loading status...</p>
         )}
       </CardContent>
     </Card>

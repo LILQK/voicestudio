@@ -1,9 +1,12 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
 import {
+  ChevronDown,
+  MoreHorizontal,
   Download,
   Loader2,
   Pause,
   Play,
+  Plus,
   RefreshCcw,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -17,10 +20,10 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
+  DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Select } from "@/components/ui/select";
 import { SpeakerAvatar } from "@/components/ui/speaker-avatar";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
@@ -28,6 +31,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { VoiceManagerDrawer } from "@/components/voice-manager-drawer";
 import {
   createVoicePreset,
+  deleteGeneratedAudioViaProxy,
   deleteVoicePreset,
   extractGeneratedAudioUrl,
   fetchAudioViaProxy,
@@ -38,6 +42,15 @@ import {
   type QwenState,
   type VoicePreset,
 } from "@/lib/apiClient";
+import {
+  deleteProject as deleteStoredProject,
+  getProject,
+  listProjects,
+  renameProject as renameStoredProject,
+  upsertProject,
+  type StoredParagraph,
+  type StoredProject,
+} from "@/lib/projectsStore";
 type ModelItem = {
   id: string;
   name: string;
@@ -61,6 +74,13 @@ type ParagraphItem = {
 };
 
 type GenerationStatus = "idle" | "running" | "completed" | "partial_error";
+type ProjectHistoryItem = {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+};
+type DisplayProjectItem = ProjectHistoryItem & { isTransient?: boolean };
 
 const MAX_SEGMENT_CHARACTERS = 320;
 const AUTO_SPLIT_DELAY_MS = 1800;
@@ -92,6 +112,13 @@ const formatDurationLabel = (seconds: number): string => {
   const mins = Math.floor(total / 60);
   const secs = total % 60;
   return `${mins}:${secs.toString().padStart(2, "0")}`;
+};
+
+const twoDigits = (value: number): string => value.toString().padStart(2, "0");
+
+const buildProjectName = (timestampMs: number): string => {
+  const date = new Date(timestampMs);
+  return `Project ${date.getFullYear()}-${twoDigits(date.getMonth() + 1)}-${twoDigits(date.getDate())} ${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}`;
 };
 
 const buildPresetModelItems = (presets: { name: string; size: number }[]): ModelItem[] =>
@@ -171,6 +198,53 @@ const buildGenerationStatus = (paragraphs: ParagraphItem[]): GenerationStatus =>
   return "idle";
 };
 
+const sortProjectHistory = (items: ProjectHistoryItem[]): ProjectHistoryItem[] =>
+  [...items].sort((left, right) => right.updatedAt - left.updatedAt);
+
+const toHistoryItem = (project: StoredProject): ProjectHistoryItem => ({
+  id: project.id,
+  name: project.name,
+  createdAt: project.createdAt,
+  updatedAt: project.updatedAt,
+});
+
+const upsertHistoryItem = (
+  previous: ProjectHistoryItem[],
+  item: ProjectHistoryItem,
+): ProjectHistoryItem[] =>
+  sortProjectHistory([item, ...previous.filter((project) => project.id !== item.id)]);
+
+const hasMeaningfulSessionData = (inputText: string, paragraphs: ParagraphItem[]): boolean => {
+  if (inputText.trim().length > 0) {
+    return true;
+  }
+
+  return paragraphs.some(
+    (paragraph) => paragraph.text.trim().length > 0 || Boolean(paragraph.audioBlob),
+  );
+};
+
+const buildProjectContentSignature = (
+  inputText: string,
+  selectedModelId: string,
+  paragraphs: ParagraphItem[],
+): string =>
+  JSON.stringify({
+    inputText,
+    selectedModelId,
+    paragraphs: paragraphs.map((paragraph) => ({
+      id: paragraph.id,
+      text: paragraph.text,
+      speakerModelId: paragraph.speakerModelId,
+      speakerOverridden: paragraph.speakerOverridden,
+      status: paragraph.status,
+      error: paragraph.error ?? "",
+      audioUrl: paragraph.audioUrl ?? "",
+      audioSize: paragraph.audioBlob?.size ?? 0,
+      audioType: paragraph.audioBlob?.type ?? "",
+    })),
+  });
+
 const encodeWav = (buffer: AudioBuffer): Blob => {
   const channels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
@@ -233,8 +307,17 @@ const resampleBuffer = async (buffer: AudioBuffer, targetRate: number): Promise<
 };
 
 function App() {
+  const initialProjectTimestampRef = useRef<number>(Date.now());
   const [qwenState, setQwenState] = useState<QwenState | null>(null);
   const [inputText, setInputText] = useState("");
+  const [projects, setProjects] = useState<ProjectHistoryItem[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string>(() => createId());
+  const [activeProjectName, setActiveProjectName] = useState<string>(() =>
+    buildProjectName(initialProjectTimestampRef.current),
+  );
+  const [isProjectsReady, setIsProjectsReady] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editingProjectName, setEditingProjectName] = useState("");
   const [voicePresets, setVoicePresets] = useState<VoicePreset[]>([]);
   const [models, setModels] = useState<ModelItem[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
@@ -261,6 +344,9 @@ function App() {
   const shouldResumeAfterSeekRef = useRef(false);
   const isTimelineScrubbingRef = useRef(false);
   const timelinePlayingRef = useRef(false);
+  const activeProjectCreatedAtRef = useRef<number>(initialProjectTimestampRef.current);
+  const hydratingProjectRef = useRef(false);
+  const lastPersistedProjectSignatureRef = useRef<string | null>(null);
 
   const applyPresetModels = useCallback((presets: VoicePreset[]): void => {
     setVoicePresets(presets);
@@ -275,6 +361,33 @@ function App() {
     const presets = await getVoicePresets();
     applyPresetModels(presets);
   }, [applyPresetModels]);
+
+  useEffect(() => {
+    let active = true;
+
+    void listProjects()
+      .then((storedProjects) => {
+        if (!active) {
+          return;
+        }
+        setProjects(sortProjectHistory(storedProjects.map((project) => toHistoryItem(project))));
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setGlobalError("Unable to read project history from local storage.");
+      })
+      .finally(() => {
+        if (active) {
+          setIsProjectsReady(true);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     paragraphsRef.current = paragraphs;
@@ -361,6 +474,23 @@ function App() {
     return models.find((item) => item.id === selectedModelId) ?? models[0];
   }, [models, selectedModelId]);
   const isQwenReady = (qwenState?.status ?? "").toLowerCase() === "ready";
+  const sidebarProjects = useMemo<DisplayProjectItem[]>(() => {
+    const activeInHistory = projects.find((project) => project.id === activeProjectId);
+    if (activeInHistory) {
+      return projects;
+    }
+
+    return [
+      {
+        id: activeProjectId,
+        name: activeProjectName,
+        createdAt: activeProjectCreatedAtRef.current,
+        updatedAt: Date.now(),
+        isTransient: true,
+      },
+      ...projects,
+    ];
+  }, [projects, activeProjectId, activeProjectName]);
 
   const canGenerate =
     Boolean(selectedModel) &&
@@ -404,6 +534,72 @@ function App() {
       return changed ? next : previous;
     });
   }, [selectedModelId]);
+
+  useEffect(() => {
+    if (!isProjectsReady || !activeProjectId) {
+      return;
+    }
+
+    if (!hasMeaningfulSessionData(inputText, paragraphs)) {
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      const currentSignature = buildProjectContentSignature(inputText, selectedModelId, paragraphs);
+      if (currentSignature === lastPersistedProjectSignatureRef.current) {
+        return;
+      }
+
+      const now = Date.now();
+      const storedParagraphs: StoredParagraph[] = paragraphs.map((paragraph) => ({
+        id: paragraph.id,
+        text: paragraph.text,
+        speakerModelId: paragraph.speakerModelId,
+        speakerOverridden: paragraph.speakerOverridden,
+        status: paragraph.status,
+        audioUrl: paragraph.audioUrl,
+        audioBlob: paragraph.audioBlob,
+        error: paragraph.error,
+      }));
+
+      const payload: StoredProject = {
+        id: activeProjectId,
+        name: activeProjectName.trim() || buildProjectName(activeProjectCreatedAtRef.current),
+        createdAt: activeProjectCreatedAtRef.current,
+        updatedAt: now,
+        inputText,
+        selectedModelId,
+        paragraphs: storedParagraphs,
+      };
+
+      void upsertProject(payload)
+        .then(() => {
+          if (cancelled) {
+            return;
+          }
+          lastPersistedProjectSignatureRef.current = currentSignature;
+          setProjects((previous) => upsertHistoryItem(previous, toHistoryItem(payload)));
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setGlobalError("Unable to save project session to local storage.");
+          }
+        });
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    isProjectsReady,
+    activeProjectId,
+    activeProjectName,
+    inputText,
+    paragraphs,
+    selectedModelId,
+  ]);
 
   const canExport =
     generationStatus !== "running" &&
@@ -583,6 +779,11 @@ function App() {
   }, [timelineCurrentIndex, timelineSegmentByParagraphIndex, totalTimelineDuration]);
 
   useEffect(() => {
+    if (hydratingProjectRef.current) {
+      hydratingProjectRef.current = false;
+      return;
+    }
+
     if (generationStatus === "running") {
       return;
     }
@@ -905,6 +1106,166 @@ function App() {
     if (currentAudioUrlRef.current) {
       URL.revokeObjectURL(currentAudioUrlRef.current);
       currentAudioUrlRef.current = null;
+    }
+  };
+
+  const resetSessionPlaybackState = (): void => {
+    clearActiveAudio();
+    playbackSourceRef.current = null;
+    shouldResumeAfterSeekRef.current = false;
+    isTimelineScrubbingRef.current = false;
+    setPlayingParagraphId(null);
+    setActiveParagraphId(null);
+    setParagraphDurations({});
+    setIsTimelinePlaying(false);
+    setTimelineCurrentIndex(null);
+    setTimelinePositionSec(0);
+  };
+
+  const onCreateNewProject = (): void => {
+    const timestamp = Date.now();
+    runIdRef.current = timestamp;
+    resetSessionPlaybackState();
+    setGlobalError(null);
+    setInputText("");
+    setParagraphs([]);
+    setGenerationStatus("idle");
+    resegmentRequestedRef.current = false;
+    activeProjectCreatedAtRef.current = timestamp;
+    lastPersistedProjectSignatureRef.current = null;
+    setActiveProjectId(createId());
+    setActiveProjectName(buildProjectName(timestamp));
+  };
+
+  const onOpenProject = async (projectId: string): Promise<void> => {
+    try {
+      const project = await getProject(projectId);
+      if (!project) {
+        return;
+      }
+
+      runIdRef.current = Date.now();
+      resetSessionPlaybackState();
+      resegmentRequestedRef.current = false;
+      hydratingProjectRef.current = true;
+
+      const hydratedParagraphs: ParagraphItem[] = project.paragraphs.map((paragraph) => ({
+        id: paragraph.id,
+        text: paragraph.text,
+        speakerModelId: paragraph.speakerModelId,
+        speakerOverridden: paragraph.speakerOverridden,
+        status: paragraph.status,
+        audioUrl: paragraph.audioUrl,
+        audioBlob: paragraph.audioBlob,
+        error: paragraph.error,
+      }));
+
+      setInputText(project.inputText);
+      setParagraphs(hydratedParagraphs);
+      setSelectedModelId(project.selectedModelId);
+      setGenerationStatus(buildGenerationStatus(hydratedParagraphs));
+      setGlobalError(null);
+      setActiveProjectId(project.id);
+      setActiveProjectName(project.name);
+      activeProjectCreatedAtRef.current = project.createdAt;
+      lastPersistedProjectSignatureRef.current = buildProjectContentSignature(
+        project.inputText,
+        project.selectedModelId,
+        hydratedParagraphs,
+      );
+    } catch {
+      setGlobalError("Unable to open the selected project.");
+    }
+  };
+
+  const onRenameProject = (projectId: string): void => {
+    const current = sidebarProjects.find((project) => project.id === projectId);
+    if (!current) {
+      return;
+    }
+    setEditingProjectId(projectId);
+    setEditingProjectName(current.name);
+  };
+
+  const onCommitProjectRename = async (projectId: string): Promise<void> => {
+    const current = sidebarProjects.find((project) => project.id === projectId);
+    const nextName = editingProjectName.trim();
+    setEditingProjectId(null);
+    setEditingProjectName("");
+
+    if (!current || !nextName || nextName === current.name) {
+      return;
+    }
+
+    if (current.isTransient) {
+      if (projectId === activeProjectId) {
+        setActiveProjectName(nextName);
+      }
+      return;
+    }
+
+    try {
+      const renamed = await renameStoredProject(projectId, nextName);
+      if (!renamed) {
+        return;
+      }
+
+      if (projectId === activeProjectId) {
+        setActiveProjectName(nextName);
+      }
+
+      setProjects((previous) => upsertHistoryItem(previous, toHistoryItem(renamed)));
+    } catch {
+      setGlobalError("Unable to rename project.");
+    }
+  };
+
+  const onDeleteProject = async (projectId: string): Promise<void> => {
+    const current = sidebarProjects.find((project) => project.id === projectId);
+    if (!current) {
+      return;
+    }
+
+    const accepted = window.confirm(`Delete "${current.name}"?`);
+    if (!accepted) {
+      return;
+    }
+
+    if (current.isTransient) {
+      if (projectId === activeProjectId) {
+        onCreateNewProject();
+      }
+      return;
+    }
+
+    try {
+      const stored = await getProject(projectId);
+      const linkedAudioUrls = Array.from(
+        new Set(
+          (stored?.paragraphs ?? [])
+            .map((paragraph) => paragraph.audioUrl)
+            .filter((url): url is string => Boolean(url)),
+        ),
+      );
+
+      await Promise.all(
+        linkedAudioUrls.map(async (url) => {
+          try {
+            await deleteGeneratedAudioViaProxy(url);
+          } catch {
+            // Best effort cleanup; some files may no longer exist upstream.
+          }
+        }),
+      );
+
+      await deleteStoredProject(projectId);
+      setProjects((previous) => previous.filter((project) => project.id !== projectId));
+
+      if (projectId === activeProjectId) {
+        onCreateNewProject();
+      }
+    } catch {
+      setGlobalError("Unable to delete project.");
     }
   };
 
@@ -1300,9 +1661,99 @@ function App() {
               <h1 className="mt-1 text-xl font-semibold">TTS Editor</h1>
             </div>
 
-            <Button variant="outline" className="w-full" onClick={() => setIsVoiceManagerOpen(true)}>
-              Create Voices
-            </Button>
+            <Card className="gap-0">
+              <CardHeader className="pb-1">
+                <div className="flex items-center justify-between gap-2">
+                  <CardTitle className="text-sm">Projects</CardTitle>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={onCreateNewProject}
+                    aria-label="Create new project"
+                  >
+                    <Plus />
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent className="pt-0">
+                <div className="space-y-1">
+                  {!isProjectsReady ? (
+                    <p className="text-xs text-muted-foreground">Loading project history...</p>
+                  ) : sidebarProjects.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No saved projects yet.</p>
+                  ) : (
+                    sidebarProjects.map((project) => (
+                      <div
+                        key={project.id}
+                        className="group/item flex items-center gap-1 transition-colors hover:bg-muted/50"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => void onOpenProject(project.id)}
+                          className="min-w-0 flex-1 py-1.5 text-left"
+                        >
+                          {editingProjectId === project.id ? (
+                            <Input
+                              value={editingProjectName}
+                              autoFocus
+                              className="h-8"
+                              onClick={(event) => event.stopPropagation()}
+                              onChange={(event) => setEditingProjectName(event.target.value)}
+                              onBlur={() => void onCommitProjectRename(project.id)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  void onCommitProjectRename(project.id);
+                                }
+                                if (event.key === "Escape") {
+                                  setEditingProjectId(null);
+                                  setEditingProjectName("");
+                                }
+                              }}
+                            />
+                          ) : (
+                            <p
+                              className={`line-clamp-1 text-sm ${
+                                project.id === activeProjectId
+                                  ? "inline-block -ml-2 rounded-md bg-muted px-2 py-0.5 font-semibold text-foreground"
+                                  : "font-normal text-foreground/85"
+                              }`}
+                            >
+                              {project.name}
+                            </p>
+                          )}
+                        </button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="mr-1 size-7 shrink-0 opacity-0 transition-opacity group-hover/item:opacity-100 group-focus-within/item:opacity-100"
+                              aria-label={`Project actions for ${project.name}`}
+                            >
+                              <MoreHorizontal />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-40">
+                            <DropdownMenuItem onSelect={() => onRenameProject(project.id)}>
+                              Rename
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="text-destructive focus:text-destructive"
+                              onSelect={() => void onDeleteProject(project.id)}
+                            >
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </Card>
 
             <Card>
               <CardHeader className="pb-3">
@@ -1310,20 +1761,34 @@ function App() {
               </CardHeader>
               <CardContent className="space-y-3">
                 <Input type="file" accept=".pt,.pth,.bin" multiple onChange={onAddModels} />
-                <Select
-                  disabled={models.length === 0 || generationStatus === "running"}
-                  value={selectedModelId}
-                  onChange={(event) => setSelectedModelId(event.target.value)}
-                >
-                  <option value="" disabled>
-                    Select a model
-                  </option>
-                  {models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name}
-                    </option>
-                  ))}
-                </Select>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full justify-between font-normal"
+                      disabled={models.length === 0 || generationStatus === "running"}
+                    >
+                      <span className="truncate">
+                        {selectedModel?.name ?? "Select a model"}
+                      </span>
+                      <ChevronDown className="size-4 text-muted-foreground" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                    <DropdownMenuLabel className="text-xs text-muted-foreground">Available voice models</DropdownMenuLabel>
+                    <DropdownMenuRadioGroup
+                      value={selectedModelId || selectedModel?.id || ""}
+                      onValueChange={(value: string) => setSelectedModelId(value)}
+                    >
+                      {models.map((model) => (
+                        <DropdownMenuRadioItem key={model.id} value={model.id}>
+                          {model.name}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 {selectedModel ? (
                   <div className="rounded-md border border-border/80 bg-muted/60 p-2 text-xs">
                     <p className="font-medium">Active: {selectedModel.name}</p>
@@ -1337,6 +1802,9 @@ function App() {
                     No voices found in `/voices`. Upload one or add `.pt/.pth/.bin` files there.
                   </p>
                 )}
+                <Button variant="outline" className="w-full" onClick={() => setIsVoiceManagerOpen(true)}>
+                  Create Voices
+                </Button>
               </CardContent>
             </Card>
 

@@ -31,3 +31,9 @@ Short log of mistakes that were found and corrected, so they are not repeated.
 - Mistake: New paragraph splitting logic could recreate paragraph items without carrying speaker metadata.
 - Fix: Initialized `speakerModelId`/`speakerOverridden` for new paragraphs and preserved previous items when text matches.
 - Prevention: When adding paragraph-level features, audit all `setParagraphs` paths to ensure metadata survives edits and auto-split.
+
+## 2026-04-04 - Avoid hydration re-segmentation on project restore
+- Context: Added project persistence and loading from IndexedDB.
+- Mistake: Restoring `inputText` + `paragraphs` could trigger the auto-split effect and overwrite hydrated paragraphs.
+- Fix: Added a hydration guard ref to skip one split cycle immediately after loading a saved project.
+- Prevention: Any state hydration path that touches text + derived blocks must explicitly guard reactive transformation effects.

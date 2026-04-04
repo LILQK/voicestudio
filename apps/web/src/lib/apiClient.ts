@@ -146,6 +146,16 @@ export const fetchAudioViaProxy = async (sourceUrl: string): Promise<Blob> => {
   return response.blob();
 };
 
+export const deleteGeneratedAudioViaProxy = async (sourceUrl: string): Promise<void> => {
+  const response = await fetch(`/api/qwen/audio-file?url=${encodeURIComponent(sourceUrl)}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Unable to delete generated audio (${response.status})`);
+  }
+};
+
 export const getVoicePresets = async (): Promise<VoicePreset[]> => {
   const response = await fetch("/api/qwen/voices");
   const json = await response.json();

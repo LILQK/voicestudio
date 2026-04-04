@@ -271,6 +271,40 @@ qwenRouter.get("/audio-file", async (req: Request, res: Response): Promise<void>
   res.send(Buffer.from(response.data));
 });
 
+qwenRouter.delete("/audio-file", async (req: Request, res: Response): Promise<void> => {
+  await assertReadyOrThrow();
+
+  const sourceUrl = typeof req.query.url === "string" ? req.query.url : "";
+  if (!sourceUrl) {
+    throw new InputValidationError("Missing required query param: url");
+  }
+
+  if (!isAllowedQwenUrl(sourceUrl)) {
+    throw new InputValidationError("Audio URL is not allowed", {
+      sourceUrl,
+      expectedHost: config.qwenApiUrl,
+    });
+  }
+
+  const response = await axios.delete(sourceUrl, {
+    timeout: 120000,
+    validateStatus: () => true,
+  });
+
+  if (response.status >= 500) {
+    throw new InferenceError("Unable to delete generated audio file", {
+      status: response.status,
+      sourceUrl,
+    });
+  }
+
+  res.json({
+    ok: true,
+    deleted: response.status >= 200 && response.status < 300,
+    upstreamStatus: response.status,
+  });
+});
+
 qwenRouter.post("/run_voice_clone", upload.any(), runEndpoint("/run_voice_clone"));
 qwenRouter.post("/save_prompt", upload.any(), runEndpoint("/save_prompt"));
 qwenRouter.post("/load_prompt_and_gen", upload.any(), runEndpoint("/load_prompt_and_gen"));

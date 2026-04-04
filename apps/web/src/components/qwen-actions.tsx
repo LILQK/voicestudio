@@ -16,9 +16,9 @@ type Props = {
 };
 
 export function QwenActions({ state }: Props) {
-  const [text, setText] = useState("Hola desde VoiceStudio");
+  const [text, setText] = useState("Hello from VoiceStudio");
   const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [response, setResponse] = useState<string>("Sin llamadas aun.");
+  const [response, setResponse] = useState<string>("No calls yet.");
   const [error, setError] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
 
@@ -52,7 +52,7 @@ export function QwenActions({ state }: Props) {
 
       setResponse(JSON.stringify(result, null, 2));
     } catch (apiError) {
-      setError(apiError instanceof Error ? apiError.message : "Error desconocido invocando endpoint");
+      setError(apiError instanceof Error ? apiError.message : "Unknown error while calling endpoint");
     } finally {
       setIsBusy(false);
     }
@@ -61,19 +61,19 @@ export function QwenActions({ state }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg">Acciones Qwen</CardTitle>
+        <CardTitle className="text-lg">Qwen Actions</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
           <label className="text-sm font-medium" htmlFor="qwen-text">
-            Texto de prueba
+            Test text
           </label>
           <Textarea id="qwen-text" value={text} onChange={onTextChange} />
         </div>
 
         <div className="space-y-2">
           <label className="text-sm font-medium" htmlFor="qwen-audio">
-            Audio/prompt (opcional)
+            Audio/prompt (optional)
           </label>
           <Input id="qwen-audio" type="file" onChange={onFileChange} />
         </div>
@@ -92,13 +92,13 @@ export function QwenActions({ state }: Props) {
 
         {error ? (
           <Alert variant="destructive">
-            <AlertTitle>Error tecnico</AlertTitle>
+            <AlertTitle>Technical error</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         ) : null}
 
         <div className="space-y-2">
-          <p className="text-sm font-medium">Resultado</p>
+          <p className="text-sm font-medium">Result</p>
           <pre className="max-h-72 overflow-auto rounded-md border bg-muted p-3 text-xs">{response}</pre>
         </div>
       </CardContent>
