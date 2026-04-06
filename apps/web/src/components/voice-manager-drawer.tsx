@@ -385,7 +385,8 @@ export function VoiceManagerDrawer({
                       <article
                         key={voice.name}
                         className={cn(
-                          "rounded-lg border border-border bg-muted/40 p-3",
+                          "rounded-lg border border-border bg-muted/40 p-3 transition-colors transition-shadow",
+                          !isEditing ? "hover:border-primary/50 hover:bg-accent/40 hover:shadow-sm" : "",
                           isSelected ? "border-primary/70 bg-primary/5" : "",
                         )}
                       >
@@ -393,7 +394,7 @@ export function VoiceManagerDrawer({
                           <div className="space-y-2">
                             <button
                               type="button"
-                              className="w-full text-left"
+                              className="w-full cursor-pointer rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               onClick={() => {
                                 onSelectVoicePreset(voice.name);
                                 onClose();
