@@ -46,11 +46,13 @@ const headersForPayload = (
 const postEndpoint = async (
   endpoint: string,
   payload: FormData | Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<ProxyResult> => {
   const response = await fetch(`/api/qwen/${endpoint}`, {
     method: "POST",
     body: asFormDataIfNeeded(payload),
     headers: headersForPayload(payload),
+    signal,
   });
 
   const text = await response.text();
@@ -98,7 +100,8 @@ export const savePrompt = async (
 
 export const loadPromptAndGen = async (
   payload: FormData | Record<string, unknown>,
-): Promise<ProxyResult> => postEndpoint("load_prompt_and_gen", payload);
+  options?: { signal?: AbortSignal },
+): Promise<ProxyResult> => postEndpoint("load_prompt_and_gen", payload, options?.signal);
 
 const hasUrl = (value: unknown): value is { url: string } =>
   Boolean(
@@ -137,8 +140,16 @@ const findAudioUrl = (value: unknown): string | null => {
 
 export const extractGeneratedAudioUrl = (result: ProxyResult): string | null => findAudioUrl(result.data);
 
-export const fetchAudioViaProxy = async (sourceUrl: string): Promise<Blob> => {
-  const response = await fetch(`/api/qwen/audio-file?url=${encodeURIComponent(sourceUrl)}`);
+export const buildAudioProxyUrl = (sourceUrl: string): string =>
+  `/api/qwen/audio-file?url=${encodeURIComponent(sourceUrl)}`;
+
+export const fetchAudioViaProxy = async (
+  sourceUrl: string,
+  options?: { signal?: AbortSignal },
+): Promise<Blob> => {
+  const response = await fetch(buildAudioProxyUrl(sourceUrl), {
+    signal: options?.signal,
+  });
   if (!response.ok) {
     throw new Error(`Unable to fetch generated audio (${response.status})`);
   }
@@ -147,7 +158,7 @@ export const fetchAudioViaProxy = async (sourceUrl: string): Promise<Blob> => {
 };
 
 export const deleteGeneratedAudioViaProxy = async (sourceUrl: string): Promise<void> => {
-  const response = await fetch(`/api/qwen/audio-file?url=${encodeURIComponent(sourceUrl)}`, {
+  const response = await fetch(buildAudioProxyUrl(sourceUrl), {
     method: "DELETE",
   });
 

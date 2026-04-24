@@ -20,6 +20,24 @@ Short log of mistakes that were found and corrected, so they are not repeated.
 
 ## Lessons
 
+## 2026-04-24 - Recover stale generating state after interruptions
+- Context: Queue generation could be interrupted by closing/restarting the backend or app.
+- Mistake: Paragraphs in `generating` state were persisted/restored as-is, which could leave UI controls blocked after reopening.
+- Fix: Added generation cancellation with request abort support and normalized interrupted `generating` paragraphs to `pending`/`ok` on save and restore.
+- Prevention: Never persist long-running transient states as final session state; always recover interrupted jobs to a resumable UI state.
+
+## 2026-04-24 - Close JSX map returns explicitly
+- Context: Added selection-aware paragraph rendering with a block body in `paragraphs.map`.
+- Mistake: Missed the closing `)` for `return (...)`, causing a TypeScript parse error.
+- Fix: Added explicit `return (...)` closure before ending the map callback.
+- Prevention: After converting implicit JSX returns to block bodies, run a quick syntax check/build before continuing.
+
+## 2026-04-24 - Avoid storing generated audio blobs in active UI state
+- Context: Long TTS generations (8+ minutes) could crash the browser tab with out-of-memory.
+- Mistake: Generated clips were fetched as `Blob`, kept in React state, and persisted via autosave, multiplying memory pressure.
+- Fix: Switched generation and playback flow to URL-first (`audioUrl` via backend proxy), stopped persisting blobs in project autosave, and kept blob usage only as fallback/export path.
+- Prevention: For long-running media workflows, store references/URLs in state and fetch binary data lazily only at the point of use.
+
 ## 2026-04-03 - Timeline seek race conditions
 - Context: Timeline seek + playback controls in the web footer.
 - Mistake: Seeking while audio was playing could leave stale callbacks and overlapping audio.

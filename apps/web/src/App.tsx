@@ -8,6 +8,7 @@ import {
   Play,
   Plus,
   RefreshCcw,
+  Square,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +31,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { VoiceManagerDrawer } from "@/components/voice-manager-drawer";
 import {
+  buildAudioProxyUrl,
   createVoicePreset,
   deleteGeneratedAudioViaProxy,
   deleteVoicePreset,
@@ -49,6 +51,7 @@ import {
   renameProject as renameStoredProject,
   upsertProject,
   type StoredParagraph,
+  type StoredParagraphStatus,
   type StoredProject,
 } from "@/lib/projectsStore";
 type ModelItem = {
@@ -197,6 +200,54 @@ const buildGenerationStatus = (paragraphs: ParagraphItem[]): GenerationStatus =>
   return "idle";
 };
 
+const normalizeGeneratingStatus = (
+  status: ParagraphStatus | StoredParagraphStatus,
+  hasAudio: boolean,
+): ParagraphStatus => {
+  if (status !== "generating") {
+    return status;
+  }
+
+  return hasAudio ? "ok" : "pending";
+};
+
+const recoverInterruptedParagraph = (
+  paragraph: ParagraphItem,
+  reason: "cancelled" | "restored",
+): ParagraphItem => {
+  if (paragraph.status !== "generating") {
+    return paragraph;
+  }
+
+  const hasAudio = hasParagraphAudio(paragraph);
+  return {
+    ...paragraph,
+    status: normalizeGeneratingStatus(paragraph.status, hasAudio),
+    error: hasAudio ? undefined : reason === "cancelled" ? "Generation cancelled." : undefined,
+  };
+};
+
+const hasParagraphAudio = (paragraph: ParagraphItem): boolean =>
+  Boolean(paragraph.audioUrl || paragraph.audioBlob);
+
+const getParagraphAudioSource = (
+  paragraph: ParagraphItem,
+): { src: string; cleanup?: () => void } | null => {
+  if (paragraph.audioUrl) {
+    return { src: buildAudioProxyUrl(paragraph.audioUrl) };
+  }
+
+  if (paragraph.audioBlob) {
+    const objectUrl = URL.createObjectURL(paragraph.audioBlob);
+    return {
+      src: objectUrl,
+      cleanup: () => URL.revokeObjectURL(objectUrl),
+    };
+  }
+
+  return null;
+};
+
 const sortProjectHistory = (items: ProjectHistoryItem[]): ProjectHistoryItem[] =>
   [...items].sort((left, right) => right.updatedAt - left.updatedAt);
 
@@ -219,7 +270,7 @@ const hasMeaningfulSessionData = (inputText: string, paragraphs: ParagraphItem[]
   }
 
   return paragraphs.some(
-    (paragraph) => paragraph.text.trim().length > 0 || Boolean(paragraph.audioBlob),
+    (paragraph) => paragraph.text.trim().length > 0 || hasParagraphAudio(paragraph),
   );
 };
 
@@ -325,6 +376,7 @@ function App() {
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [activeParagraphId, setActiveParagraphId] = useState<string | null>(null);
+  const [selectedParagraphIds, setSelectedParagraphIds] = useState<string[]>([]);
   const [playingParagraphId, setPlayingParagraphId] = useState<string | null>(null);
   const [paragraphDurations, setParagraphDurations] = useState<Record<string, number>>({});
   const [timelinePositionSec, setTimelinePositionSec] = useState(0);
@@ -333,16 +385,19 @@ function App() {
   const [isVoiceManagerOpen, setIsVoiceManagerOpen] = useState(false);
 
   const runIdRef = useRef(0);
+  const generationAbortControllerRef = useRef<AbortController | null>(null);
   const paragraphsRef = useRef<ParagraphItem[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const resegmentRequestedRef = useRef(false);
-  const currentAudioUrlRef = useRef<string | null>(null);
+  const currentAudioCleanupRef = useRef<(() => void) | null>(null);
   const durationCacheRef = useRef<WeakMap<Blob, number>>(new WeakMap());
+  const durationByUrlCacheRef = useRef<Map<string, number>>(new Map());
   const playbackSourceRef = useRef<"manual" | "timeline" | null>(null);
   const seekRequestIdRef = useRef(0);
   const shouldResumeAfterSeekRef = useRef(false);
   const isTimelineScrubbingRef = useRef(false);
   const timelinePlayingRef = useRef(false);
+  const paragraphSelectionAnchorIndexRef = useRef<number | null>(null);
   const activeProjectCreatedAtRef = useRef<number>(initialProjectTimestampRef.current);
   const hydratingProjectRef = useRef(false);
   const lastPersistedProjectSignatureRef = useRef<string | null>(null);
@@ -412,6 +467,18 @@ function App() {
   }, [paragraphs, activeParagraphId]);
 
   useEffect(() => {
+    setSelectedParagraphIds((previous) => {
+      if (previous.length === 0) {
+        return previous;
+      }
+
+      const availableIds = new Set(paragraphs.map((paragraph) => paragraph.id));
+      const next = previous.filter((id) => availableIds.has(id));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [paragraphs]);
+
+  useEffect(() => {
     let active = true;
 
     const loadStatus = async (): Promise<void> => {
@@ -442,6 +509,8 @@ function App() {
     return () => {
       active = false;
       clearInterval(interval);
+      generationAbortControllerRef.current?.abort();
+      generationAbortControllerRef.current = null;
       clearActiveAudio();
     };
   }, []);
@@ -499,6 +568,17 @@ function App() {
     Boolean(selectedModel) &&
     paragraphs.length > 0 &&
     generationStatus !== "running";
+  const selectedParagraphIdSet = useMemo(
+    () => new Set(selectedParagraphIds),
+    [selectedParagraphIds],
+  );
+  const orderedSelectedParagraphIds = useMemo(
+    () =>
+      paragraphs
+        .filter((paragraph) => selectedParagraphIdSet.has(paragraph.id))
+        .map((paragraph) => paragraph.id),
+    [paragraphs, selectedParagraphIdSet],
+  );
 
   useEffect(() => {
     if (models.length === 0) {
@@ -560,9 +640,8 @@ function App() {
         text: paragraph.text,
         speakerModelId: paragraph.speakerModelId,
         speakerOverridden: paragraph.speakerOverridden,
-        status: paragraph.status,
+        status: normalizeGeneratingStatus(paragraph.status, hasParagraphAudio(paragraph)),
         audioUrl: paragraph.audioUrl,
-        audioBlob: paragraph.audioBlob,
         error: paragraph.error,
       }));
 
@@ -608,12 +687,12 @@ function App() {
     generationStatus !== "running" &&
     !isExporting &&
     paragraphs.length > 0 &&
-    paragraphs.every((paragraph) => paragraph.status === "ok" && paragraph.audioBlob);
+    paragraphs.every((paragraph) => paragraph.status === "ok" && hasParagraphAudio(paragraph));
 
   const playableParagraphIndexes = useMemo(
     () =>
       paragraphs.reduce<number[]>((acc, paragraph, index) => {
-        if (paragraph.status === "ok" && paragraph.audioBlob) {
+        if (paragraph.status === "ok" && hasParagraphAudio(paragraph)) {
           acc.push(index);
         }
         return acc;
@@ -657,7 +736,7 @@ function App() {
     let cancelled = false;
 
     const playableParagraphs = paragraphs.filter(
-      (paragraph) => paragraph.status === "ok" && Boolean(paragraph.audioBlob),
+      (paragraph) => paragraph.status === "ok" && hasParagraphAudio(paragraph),
     );
 
     if (playableParagraphs.length === 0) {
@@ -682,7 +761,36 @@ function App() {
       return;
     }
 
-    const readDuration = async (blob: Blob): Promise<number> => {
+    const readDuration = async (paragraph: ParagraphItem): Promise<number> => {
+      if (paragraph.audioUrl) {
+        const cached = durationByUrlCacheRef.current.get(paragraph.audioUrl);
+        if (cached !== undefined) {
+          return cached;
+        }
+
+        const audio = new Audio();
+        audio.preload = "metadata";
+        audio.src = buildAudioProxyUrl(paragraph.audioUrl);
+        const duration = await new Promise<number>((resolve) => {
+          const done = (value: number) => {
+            audio.onloadedmetadata = null;
+            audio.onerror = null;
+            resolve(Number.isFinite(value) && value > 0 ? value : 0);
+          };
+
+          audio.onloadedmetadata = () => done(audio.duration);
+          audio.onerror = () => done(0);
+        });
+
+        durationByUrlCacheRef.current.set(paragraph.audioUrl, duration);
+        return duration;
+      }
+
+      const blob = paragraph.audioBlob;
+      if (!blob) {
+        return 0;
+      }
+
       const cached = durationCacheRef.current.get(blob);
       if (cached !== undefined) {
         return cached;
@@ -711,8 +819,7 @@ function App() {
 
     void Promise.all(
       pending.map(async (paragraph) => {
-        const blob = paragraph.audioBlob;
-        const duration = blob ? await readDuration(blob) : 0;
+        const duration = await readDuration(paragraph);
         return { id: paragraph.id, duration };
       }),
     ).then((results) => {
@@ -904,7 +1011,11 @@ function App() {
     setParagraphs((previous) => previous.map((item) => (item.id === id ? updater(item) : item)));
   };
 
-  const generateSingleParagraph = async (id: string, runId: number): Promise<boolean> => {
+  const generateSingleParagraph = async (
+    id: string,
+    runId: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> => {
     const target = paragraphsRef.current.find((item) => item.id === id);
     if (!target) {
       return false;
@@ -942,8 +1053,18 @@ function App() {
     updateParagraph(id, (item) => ({
       ...item,
       status: "generating",
+      audioUrl: undefined,
+      audioBlob: undefined,
       error: undefined,
     }));
+    setParagraphDurations((previous) => {
+      if (!(id in previous)) {
+        return previous;
+      }
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
 
     try {
       const formData = new FormData();
@@ -956,14 +1077,12 @@ function App() {
         throw new Error("Selected voice model is invalid.");
       }
 
-      const result = await loadPromptAndGen(formData);
+      const result = await loadPromptAndGen(formData, { signal });
       const audioUrl = extractGeneratedAudioUrl(result);
 
       if (!audioUrl) {
         throw new Error("No audio URL found in Qwen response.");
       }
-
-      const audioBlob = await fetchAudioViaProxy(audioUrl);
 
       if (runId !== runIdRef.current) {
         return false;
@@ -973,7 +1092,7 @@ function App() {
         ...item,
         status: "ok",
         audioUrl,
-        audioBlob,
+        audioBlob: undefined,
         error: undefined,
       }));
 
@@ -986,6 +1105,7 @@ function App() {
       updateParagraph(id, (item) => ({
         ...item,
         status: "error",
+        audioUrl: undefined,
         audioBlob: undefined,
         error: error instanceof Error ? error.message : "Unknown error while generating audio.",
       }));
@@ -995,28 +1115,59 @@ function App() {
 
   const runQueue = async (ids: string[]): Promise<void> => {
     const runId = Date.now();
+    const abortController = new AbortController();
     runIdRef.current = runId;
+    generationAbortControllerRef.current = abortController;
     setGlobalError(null);
     setGenerationStatus("running");
 
     let failed = false;
 
-    for (const id of ids) {
-      const success = await generateSingleParagraph(id, runId);
-      if (!success) {
-        failed = true;
+    try {
+      for (const id of ids) {
+        if (runId !== runIdRef.current || abortController.signal.aborted) {
+          break;
+        }
+
+        const success = await generateSingleParagraph(id, runId, abortController.signal);
+        if (runId !== runIdRef.current || abortController.signal.aborted) {
+          break;
+        }
+
+        if (!success) {
+          failed = true;
+        }
+      }
+
+      if (runId !== runIdRef.current || abortController.signal.aborted) {
+        return;
+      }
+
+      setGenerationStatus(failed ? "partial_error" : "completed");
+    } finally {
+      if (generationAbortControllerRef.current === abortController) {
+        generationAbortControllerRef.current = null;
       }
     }
-
-    if (runId !== runIdRef.current) {
-      return;
-    }
-
-    setGenerationStatus(failed ? "partial_error" : "completed");
   };
 
-  const onGenerateAll = async (): Promise<void> => {
-    if (!canGenerate) {
+  const onCancelGeneration = (): void => {
+    runIdRef.current = Date.now();
+    generationAbortControllerRef.current?.abort();
+    generationAbortControllerRef.current = null;
+    setParagraphs((previous) => {
+      const next = previous.map((paragraph) => recoverInterruptedParagraph(paragraph, "cancelled"));
+      setGenerationStatus(buildGenerationStatus(next));
+      return next;
+    });
+  };
+
+  const generateParagraphBatch = async (ids: string[]): Promise<void> => {
+    if (ids.length === 0 || generationStatus === "running") {
+      return;
+    }
+    if (!selectedModel) {
+      setGlobalError("No model selected. Choose a voice preset to process.");
       return;
     }
     if (!isQwenReady) {
@@ -1024,8 +1175,31 @@ function App() {
       return;
     }
 
-    const ids = paragraphsRef.current.map((item) => item.id);
+    setSelectedParagraphIds(ids);
     await runQueue(ids);
+  };
+
+  const onGenerateAll = async (): Promise<void> => {
+    if (!canGenerate) {
+      return;
+    }
+
+    const ids = paragraphsRef.current.map((item) => item.id);
+    await generateParagraphBatch(ids);
+  };
+
+  const onGenerateFromParagraph = async (paragraphId: string): Promise<void> => {
+    const startIndex = paragraphsRef.current.findIndex((item) => item.id === paragraphId);
+    if (startIndex < 0) {
+      return;
+    }
+
+    const ids = paragraphsRef.current.slice(startIndex).map((item) => item.id);
+    await generateParagraphBatch(ids);
+  };
+
+  const onGenerateSelectedParagraphs = async (): Promise<void> => {
+    await generateParagraphBatch(orderedSelectedParagraphIds);
   };
 
   const onRetryParagraph = async (id: string): Promise<void> => {
@@ -1034,11 +1208,21 @@ function App() {
     }
 
     const runId = Date.now();
+    const abortController = new AbortController();
     runIdRef.current = runId;
+    generationAbortControllerRef.current = abortController;
     setGenerationStatus("running");
 
-    await generateSingleParagraph(id, runId);
-    setGenerationStatus(buildGenerationStatus(paragraphsRef.current));
+    try {
+      await generateSingleParagraph(id, runId, abortController.signal);
+      if (runId === runIdRef.current && !abortController.signal.aborted) {
+        setGenerationStatus(buildGenerationStatus(paragraphsRef.current));
+      }
+    } finally {
+      if (generationAbortControllerRef.current === abortController) {
+        generationAbortControllerRef.current = null;
+      }
+    }
   };
 
   const onParagraphTextChange = (id: string, text: string): void => {
@@ -1088,8 +1272,57 @@ function App() {
   };
 
   const onParagraphClick = (id: string, event: MouseEvent<HTMLTextAreaElement>): void => {
+    const clickedIndex = paragraphsRef.current.findIndex((paragraph) => paragraph.id === id);
+    if (clickedIndex === -1) {
+      return;
+    }
+
+    const isToggleSelection = event.ctrlKey || event.metaKey;
+    const isRangeSelection = event.shiftKey;
+    const isMultiSelectionClick = selectedParagraphIds.length > 1 && selectedParagraphIdSet.has(id);
+    const isSingleSelectionClick = selectedParagraphIds.length === 1 && selectedParagraphIdSet.has(id);
+
+    if (isRangeSelection) {
+      event.preventDefault();
+      const anchor = paragraphSelectionAnchorIndexRef.current ?? clickedIndex;
+      const [start, end] = anchor <= clickedIndex ? [anchor, clickedIndex] : [clickedIndex, anchor];
+      const ids = paragraphsRef.current.slice(start, end + 1).map((paragraph) => paragraph.id);
+      setSelectedParagraphIds(ids);
+      setActiveParagraphId(id);
+      return;
+    }
+
+    if (isToggleSelection) {
+      event.preventDefault();
+      setSelectedParagraphIds((previous) => {
+        const exists = previous.includes(id);
+        if (exists) {
+          return previous.filter((selectedId) => selectedId !== id);
+        }
+        return [...previous, id];
+      });
+      paragraphSelectionAnchorIndexRef.current = clickedIndex;
+      setActiveParagraphId(id);
+      return;
+    }
+
+    if (!isMultiSelectionClick) {
+      if (isSingleSelectionClick) {
+        setSelectedParagraphIds([]);
+        paragraphSelectionAnchorIndexRef.current = null;
+      } else {
+        setSelectedParagraphIds([id]);
+        paragraphSelectionAnchorIndexRef.current = clickedIndex;
+      }
+    }
+
     setActiveParagraphId(id);
     event.currentTarget.select();
+  };
+
+  const releaseCurrentAudioSource = (): void => {
+    currentAudioCleanupRef.current?.();
+    currentAudioCleanupRef.current = null;
   };
 
   const clearActiveAudio = (): void => {
@@ -1104,10 +1337,7 @@ function App() {
       audioRef.current = null;
     }
 
-    if (currentAudioUrlRef.current) {
-      URL.revokeObjectURL(currentAudioUrlRef.current);
-      currentAudioUrlRef.current = null;
-    }
+    releaseCurrentAudioSource();
   };
 
   const resetSessionPlaybackState = (): void => {
@@ -1125,11 +1355,15 @@ function App() {
 
   const onCreateNewProject = (): void => {
     const timestamp = Date.now();
+    generationAbortControllerRef.current?.abort();
+    generationAbortControllerRef.current = null;
     runIdRef.current = timestamp;
     resetSessionPlaybackState();
     setGlobalError(null);
     setInputText("");
     setParagraphs([]);
+    setSelectedParagraphIds([]);
+    paragraphSelectionAnchorIndexRef.current = null;
     setGenerationStatus("idle");
     resegmentRequestedRef.current = false;
     activeProjectCreatedAtRef.current = timestamp;
@@ -1145,24 +1379,33 @@ function App() {
         return;
       }
 
+      generationAbortControllerRef.current?.abort();
+      generationAbortControllerRef.current = null;
       runIdRef.current = Date.now();
       resetSessionPlaybackState();
       resegmentRequestedRef.current = false;
       hydratingProjectRef.current = true;
 
-      const hydratedParagraphs: ParagraphItem[] = project.paragraphs.map((paragraph) => ({
-        id: paragraph.id,
-        text: paragraph.text,
-        speakerModelId: paragraph.speakerModelId,
-        speakerOverridden: paragraph.speakerOverridden,
-        status: paragraph.status,
-        audioUrl: paragraph.audioUrl,
-        audioBlob: paragraph.audioBlob,
-        error: paragraph.error,
-      }));
+      const hydratedParagraphs: ParagraphItem[] = project.paragraphs.map((paragraph) =>
+        recoverInterruptedParagraph(
+          {
+            id: paragraph.id,
+            text: paragraph.text,
+            speakerModelId: paragraph.speakerModelId,
+            speakerOverridden: paragraph.speakerOverridden,
+            status: paragraph.status,
+            audioUrl: paragraph.audioUrl,
+            audioBlob: paragraph.audioUrl ? undefined : paragraph.audioBlob,
+            error: paragraph.error,
+          },
+          "restored",
+        ),
+      );
 
       setInputText(project.inputText);
       setParagraphs(hydratedParagraphs);
+      setSelectedParagraphIds([]);
+      paragraphSelectionAnchorIndexRef.current = null;
       setSelectedModelId(project.selectedModelId);
       setGenerationStatus(buildGenerationStatus(hydratedParagraphs));
       setGlobalError(null);
@@ -1273,7 +1516,7 @@ function App() {
   const findNextPlayableIndex = (startIndex: number): number => {
     for (let index = startIndex; index < paragraphsRef.current.length; index += 1) {
       const candidate = paragraphsRef.current[index];
-      if (candidate?.status === "ok" && candidate.audioBlob) {
+      if (candidate?.status === "ok" && hasParagraphAudio(candidate)) {
         return index;
       }
     }
@@ -1292,7 +1535,8 @@ function App() {
     }
 
     const target = paragraphsRef.current[targetIndex];
-    if (!target?.audioBlob) {
+    const targetSource = target ? getParagraphAudioSource(target) : null;
+    if (!targetSource || !target) {
       setIsTimelinePlaying(false);
       return;
     }
@@ -1302,10 +1546,9 @@ function App() {
 
     clearActiveAudio();
 
-    const objectUrl = URL.createObjectURL(target.audioBlob);
-    const audio = new Audio(objectUrl);
+    const audio = new Audio(targetSource.src);
     audioRef.current = audio;
-    currentAudioUrlRef.current = objectUrl;
+    currentAudioCleanupRef.current = targetSource.cleanup ?? null;
     playbackSourceRef.current = "timeline";
     setTimelineCurrentIndex(targetIndex);
     setActiveParagraphId(target.id);
@@ -1315,10 +1558,7 @@ function App() {
 
     audio.onended = () => {
       setPlayingParagraphId(null);
-      if (currentAudioUrlRef.current) {
-        URL.revokeObjectURL(currentAudioUrlRef.current);
-        currentAudioUrlRef.current = null;
-      }
+      releaseCurrentAudioSource();
 
       if (audioRef.current === audio) {
         audioRef.current = null;
@@ -1333,10 +1573,7 @@ function App() {
 
     audio.onerror = () => {
       setPlayingParagraphId(null);
-      if (currentAudioUrlRef.current) {
-        URL.revokeObjectURL(currentAudioUrlRef.current);
-        currentAudioUrlRef.current = null;
-      }
+      releaseCurrentAudioSource();
 
       if (audioRef.current === audio) {
         audioRef.current = null;
@@ -1368,7 +1605,8 @@ function App() {
     }
 
     const targetParagraph = paragraphsRef.current[targetSegment.paragraphIndex];
-    if (!targetParagraph?.audioBlob) {
+    const targetSource = targetParagraph ? getParagraphAudioSource(targetParagraph) : null;
+    if (!targetParagraph || !targetSource) {
       return;
     }
 
@@ -1381,11 +1619,10 @@ function App() {
 
     clearActiveAudio();
 
-    const objectUrl = URL.createObjectURL(targetParagraph.audioBlob);
-    const audio = new Audio(objectUrl);
+    const audio = new Audio(targetSource.src);
     const seekRequestId = seekRequestIdRef.current;
     audioRef.current = audio;
-    currentAudioUrlRef.current = objectUrl;
+    currentAudioCleanupRef.current = targetSource.cleanup ?? null;
     playbackSourceRef.current = "timeline";
     setTimelineCurrentIndex(targetSegment.paragraphIndex);
     setActiveParagraphId(targetParagraph.id);
@@ -1394,10 +1631,7 @@ function App() {
 
     audio.onended = () => {
       setPlayingParagraphId(null);
-      if (currentAudioUrlRef.current) {
-        URL.revokeObjectURL(currentAudioUrlRef.current);
-        currentAudioUrlRef.current = null;
-      }
+      releaseCurrentAudioSource();
 
       if (audioRef.current === audio) {
         audioRef.current = null;
@@ -1412,10 +1646,7 @@ function App() {
 
     audio.onerror = () => {
       setPlayingParagraphId(null);
-      if (currentAudioUrlRef.current) {
-        URL.revokeObjectURL(currentAudioUrlRef.current);
-        currentAudioUrlRef.current = null;
-      }
+      releaseCurrentAudioSource();
 
       if (audioRef.current === audio) {
         audioRef.current = null;
@@ -1509,7 +1740,7 @@ function App() {
   };
 
   const onParagraphPlaybackToggle = (item: ParagraphItem): void => {
-    if (!item.audioBlob) {
+    if (!hasParagraphAudio(item)) {
       return;
     }
 
@@ -1547,7 +1778,8 @@ function App() {
   };
 
   const onPlay = (item: ParagraphItem): void => {
-    if (!item.audioBlob) {
+    const source = getParagraphAudioSource(item);
+    if (!source) {
       return;
     }
 
@@ -1562,19 +1794,15 @@ function App() {
       setTimelinePositionSec(segment?.start ?? 0);
     }
 
-    const objectUrl = URL.createObjectURL(item.audioBlob);
-    const audio = new Audio(objectUrl);
+    const audio = new Audio(source.src);
     audioRef.current = audio;
-    currentAudioUrlRef.current = objectUrl;
+    currentAudioCleanupRef.current = source.cleanup ?? null;
     setActiveParagraphId(item.id);
     setPlayingParagraphId(item.id);
 
     audio.onended = () => {
       setPlayingParagraphId(null);
-      if (currentAudioUrlRef.current) {
-        URL.revokeObjectURL(currentAudioUrlRef.current);
-        currentAudioUrlRef.current = null;
-      }
+      releaseCurrentAudioSource();
 
       if (audioRef.current === audio) {
         audioRef.current = null;
@@ -1583,10 +1811,7 @@ function App() {
 
     audio.onerror = () => {
       setPlayingParagraphId(null);
-      if (currentAudioUrlRef.current) {
-        URL.revokeObjectURL(currentAudioUrlRef.current);
-        currentAudioUrlRef.current = null;
-      }
+      releaseCurrentAudioSource();
     };
 
     void audio.play().catch(() => {
@@ -1603,9 +1828,21 @@ function App() {
     setGlobalError(null);
 
     try {
-      const prepared = paragraphsRef.current
-        .map((item) => item.audioBlob)
-        .filter((blob): blob is Blob => Boolean(blob));
+      const prepared: Blob[] = [];
+      for (const item of paragraphsRef.current) {
+        if (item.status !== "ok") {
+          continue;
+        }
+
+        if (item.audioBlob) {
+          prepared.push(item.audioBlob);
+          continue;
+        }
+
+        if (item.audioUrl) {
+          prepared.push(await fetchAudioViaProxy(item.audioUrl));
+        }
+      }
 
       const audioContext = new AudioContext();
       const decoded = await Promise.all(
@@ -1821,7 +2058,7 @@ function App() {
             ) : null}
 
             <div className="space-y-3 border-0">
-                <div className="flex justify-center">
+                <div className="flex justify-center gap-2">
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <span className="inline-flex">
@@ -1835,6 +2072,12 @@ function App() {
                       <TooltipContent>No model selected. Choose a voice preset to process.</TooltipContent>
                     ) : null}
                   </Tooltip>
+                  {generationStatus === "running" ? (
+                    <Button type="button" variant="destructive" onClick={onCancelGeneration}>
+                      <Square />
+                      Cancel
+                    </Button>
+                  ) : null}
                 </div>
 
                 <div>
@@ -1848,7 +2091,11 @@ function App() {
                     />
                   ) : (
                     <div className="pr-1">
-                      {paragraphs.map((item) => (
+                      {paragraphs.map((item) => {
+                        const isSelected = selectedParagraphIdSet.has(item.id);
+                        const hasMultiSelectionContext = isSelected && orderedSelectedParagraphIds.length > 1;
+
+                        return (
                         <Popover
                           key={item.id}
                           open={activeParagraphId === item.id}
@@ -1860,7 +2107,11 @@ function App() {
                             }
                           }}
                         >
-                          <article className="relative py-1.5 pl-4 pr-1">
+                          <article
+                            className={`relative py-1.5 pl-4 pr-1 ${
+                              isSelected ? "rounded-md bg-muted/40" : ""
+                            }`}
+                          >
                             <PopoverTrigger asChild>
                               <button
                                 type="button"
@@ -1870,29 +2121,55 @@ function App() {
                               />
                             </PopoverTrigger>
                             <PopoverContent side="top" align="end" className="w-auto">
-                              <div className="flex items-center gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={!item.audioBlob}
-                                  onClick={() => onParagraphPlaybackToggle(item)}
-                                >
-                                  {playingParagraphId === item.id ? <Pause /> : <Play />}
-                                  {playingParagraphId === item.id ? "Pause" : "Play"}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  disabled={generationStatus === "running" || !selectedModel}
-                                  onClick={() => void onRetryParagraph(item.id)}
-                                >
-                                  <RefreshCcw />
-                                  Retry
-                                </Button>
-                                {!item.audioBlob ? (
-                                  <span className="text-xs text-muted-foreground">No audio</span>
-                                ) : null}
-                              </div>
+                              {hasMultiSelectionContext ? (
+                                <div className="space-y-2">
+                                  <p className="text-xs text-muted-foreground">
+                                    {orderedSelectedParagraphIds.length} paragraphs selected
+                                  </p>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    disabled={generationStatus === "running" || !selectedModel}
+                                    onClick={() => void onGenerateSelectedParagraphs()}
+                                  >
+                                    <RefreshCcw />
+                                    Regenerate selection
+                                  </Button>
+                                </div>
+                              ) : (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={!hasParagraphAudio(item)}
+                                    onClick={() => onParagraphPlaybackToggle(item)}
+                                  >
+                                    {playingParagraphId === item.id ? <Pause /> : <Play />}
+                                    {playingParagraphId === item.id ? "Pause" : "Play"}
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    disabled={generationStatus === "running" || !selectedModel}
+                                    onClick={() => void onRetryParagraph(item.id)}
+                                  >
+                                    <RefreshCcw />
+                                    Retry
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    disabled={generationStatus === "running" || !selectedModel}
+                                    onClick={() => void onGenerateFromParagraph(item.id)}
+                                  >
+                                    <Play />
+                                    Generate from here
+                                  </Button>
+                                  {!hasParagraphAudio(item) ? (
+                                    <span className="text-xs text-muted-foreground">No audio</span>
+                                  ) : null}
+                                </div>
+                              )}
                             </PopoverContent>
 
                             <div className="absolute -left-10 top-1/2 z-10 -translate-y-1/2">
@@ -1960,7 +2237,8 @@ function App() {
                             {item.error ? <p className="mt-2 text-xs text-destructive">{item.error}</p> : null}
                           </article>
                         </Popover>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
