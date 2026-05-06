@@ -416,8 +416,39 @@ function App() {
     applyPresetModels(presets);
   }, [applyPresetModels]);
 
+  const applyModelToParagraphIds = useCallback(
+    (ids: string[], modelId: string, baseSelectedModelId: string): void => {
+      if (ids.length === 0) {
+        return;
+      }
+
+      const idSet = new Set(ids);
+      setParagraphs((previous) =>
+        previous.map((item) =>
+          idSet.has(item.id)
+            ? {
+                ...item,
+                speakerModelId: modelId,
+                speakerOverridden: modelId !== baseSelectedModelId,
+                status: "pending" as const,
+                error: undefined,
+                audioUrl: undefined,
+                audioBlob: undefined,
+              }
+            : item,
+        ),
+      );
+    },
+    [],
+  );
+
   const onSelectVoicePreset = (voiceName: string): void => {
-    setSelectedModelId(`${PRESET_MODEL_ID_PREFIX}${voiceName}`);
+    const nextModelId = `${PRESET_MODEL_ID_PREFIX}${voiceName}`;
+    setSelectedModelId(nextModelId);
+
+    if (orderedSelectedParagraphIds.length > 1) {
+      applyModelToParagraphIds(orderedSelectedParagraphIds, nextModelId, nextModelId);
+    }
   };
 
   useEffect(() => {
@@ -1254,21 +1285,15 @@ function App() {
   };
 
   const onParagraphSpeakerChange = (id: string, modelId: string): void => {
-    setParagraphs((previous) =>
-      previous.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              speakerModelId: modelId,
-              speakerOverridden: modelId !== selectedModelId,
-              status: "pending" as const,
-              error: undefined,
-              audioUrl: undefined,
-              audioBlob: undefined,
-            }
-          : item,
-      ),
-    );
+    const shouldApplyToSelection =
+      orderedSelectedParagraphIds.length > 1 && selectedParagraphIdSet.has(id);
+
+    if (shouldApplyToSelection) {
+      applyModelToParagraphIds(orderedSelectedParagraphIds, modelId, selectedModelId);
+      return;
+    }
+
+    applyModelToParagraphIds([id], modelId, selectedModelId);
   };
 
   const onParagraphClick = (id: string, event: MouseEvent<HTMLTextAreaElement>): void => {
@@ -1306,7 +1331,10 @@ function App() {
       return;
     }
 
-    if (!isMultiSelectionClick) {
+    if (isMultiSelectionClick && activeParagraphId === id) {
+      setSelectedParagraphIds([id]);
+      paragraphSelectionAnchorIndexRef.current = clickedIndex;
+    } else if (!isMultiSelectionClick) {
       if (isSingleSelectionClick) {
         setSelectedParagraphIds([]);
         paragraphSelectionAnchorIndexRef.current = null;
@@ -2109,7 +2137,11 @@ function App() {
                         >
                           <article
                             className={`relative py-1.5 pl-4 pr-1 ${
-                              isSelected ? "rounded-md bg-muted/40" : ""
+                              hasMultiSelectionContext
+                                ? "rounded-md border border-sky-300/70 bg-sky-100/70"
+                                : isSelected
+                                  ? "rounded-md bg-muted/40"
+                                  : ""
                             }`}
                           >
                             <PopoverTrigger asChild>
